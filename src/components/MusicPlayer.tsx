@@ -34,7 +34,11 @@ export const MusicPlayer = () => {
   };
 
   return (
-    <div className="fixed bottom-6 right-6 z-50">
+    <motion.div 
+      drag 
+      dragMomentum={false}
+      className="fixed bottom-6 right-6 z-50 cursor-grab active:cursor-grabbing"
+    >
       <motion.div
         initial={false}
         animate={{ opacity: isOpen ? 1 : 0, y: isOpen ? 0 : 20, scale: isOpen ? 1 : 0.9, display: isOpen ? 'block' : 'none' }}
@@ -98,6 +102,6 @@ export const MusicPlayer = () => {
       >
         <Music className="w-6 h-6" />
       </button>
-    </div>
+    </motion.div>
   );
 };

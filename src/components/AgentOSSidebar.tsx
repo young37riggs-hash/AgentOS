@@ -1,4 +1,5 @@
-import { Database, Settings, Cpu } from "lucide-react";
+import { useState } from "react";
+import { Database, Settings, Cpu, Plus, Trash2 } from "lucide-react";
 import { AgentStatus, MemoryResult } from "../types";
 import { StatusIndicator } from "./StatusIndicator"; // Need to create this
 
@@ -11,6 +12,8 @@ interface AgentOSSidebarProps {
   executorStatus: AgentStatus;
   reviewerStatus: AgentStatus;
   sandboxStatus: AgentStatus;
+  envVars: Record<string, string>;
+  setEnvVars: (vars: Record<string, string>) => void;
 }
 
 export const AgentOSSidebar = ({
@@ -22,7 +25,25 @@ export const AgentOSSidebar = ({
   executorStatus,
   reviewerStatus,
   sandboxStatus,
+  envVars,
+  setEnvVars,
 }: AgentOSSidebarProps) => {
+  const [newKey, setNewKey] = useState("");
+  const [newValue, setNewValue] = useState("");
+
+  const addEnvVar = () => {
+    if (newKey && newValue) {
+      setEnvVars({ ...envVars, [newKey]: newValue });
+      setNewKey("");
+      setNewValue("");
+    }
+  };
+
+  const removeEnvVar = (key: string) => {
+    const newVars = { ...envVars };
+    delete newVars[key];
+    setEnvVars(newVars);
+  };
   return (
     <>
       <div className="mb-8">
@@ -63,28 +84,24 @@ export const AgentOSSidebar = ({
 
       <div className="mb-8">
         <h2 className="text-[10px] text-gray-500 uppercase tracking-[0.3em] font-bold mb-4 flex items-center gap-2 metallic-text">
-          <Settings className="w-4 h-4" /> Sandbox Config
+          <Settings className="w-4 h-4" /> Environment Variables
         </h2>
         <div className="glass-panel border-white/5 rounded-2xl p-4 flex flex-col gap-4 text-[10px] shadow-lg">
-          <div>
-            <label className="block text-gray-500 font-bold uppercase tracking-widest text-[8px] mb-2">Image Override</label>
-            <input type="text" value={sandboxConfig.image} onChange={e => setSandboxConfig({...sandboxConfig, image: e.target.value})} placeholder="e.g., ubuntu:latest" className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-gray-200 focus:outline-none focus:border-blue-500/50 transition-colors" />
-          </div>
-          <div>
-            <label className="block text-gray-500 font-bold uppercase tracking-widest text-[8px] mb-2">Network</label>
-            <select value={sandboxConfig.network} onChange={e => setSandboxConfig({...sandboxConfig, network: e.target.value})} className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-gray-200 focus:outline-none focus:border-blue-500/50 transition-colors">
-              <option value="auto">Auto</option>
-              <option value="enabled">Enabled</option>
-              <option value="disabled">Disabled</option>
-            </select>
-          </div>
-          <div className="pt-2 border-t border-white/5">
-            <label className="flex items-center gap-3 cursor-pointer group">
-              <div className="w-10 h-5 bg-gray-800 rounded-full relative transition-colors group-hover:bg-gray-700">
-                <div className="absolute left-1 top-1 w-3 h-3 bg-gray-500 rounded-full transition-transform" />
+          <div className="space-y-2">
+            {Object.entries(envVars).map(([key, value]) => (
+              <div key={key} className="flex justify-between items-center bg-black/40 p-2 rounded-lg border border-white/5">
+                <span className="text-emerald-400 font-mono">{key}</span>
+                <span className="text-gray-300 truncate max-w-[80px]">{value}</span>
+                <button onClick={() => removeEnvVar(key)} className="text-red-500 hover:text-red-400"><Trash2 className="w-3 h-3" /></button>
               </div>
-              <span className="text-gray-500 font-medium">Auto-Cleanup</span>
-            </label>
+            ))}
+          </div>
+          <div className="flex flex-col gap-2 pt-2 border-t border-white/5">
+            <input type="text" value={newKey} onChange={e => setNewKey(e.target.value)} placeholder="Key" className="bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-gray-200 focus:outline-none focus:border-blue-500/50" />
+            <input type="text" value={newValue} onChange={e => setNewValue(e.target.value)} placeholder="Value" className="bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-gray-200 focus:outline-none focus:border-blue-500/50" />
+            <button onClick={addEnvVar} className="flex items-center justify-center gap-2 bg-blue-500/20 text-blue-400 rounded-xl py-2 hover:bg-blue-500/30">
+              <Plus className="w-3 h-3" /> Add Variable
+            </button>
           </div>
         </div>
       </div>

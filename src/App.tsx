@@ -90,7 +90,14 @@ export default function App() {
   const [activeMemories, setActiveMemories] = useState<MemoryResult[]>([]);
 
   // Additional Mode States
-  const [chatLogs, setChatLogs] = useState<{role: string, text: string}[]>([]);
+  const [envVars, setEnvVars] = useState<Record<string, string>>(() => {
+    const saved = localStorage.getItem('envVars');
+    return saved ? JSON.parse(saved) : {};
+  });
+
+  useEffect(() => {
+    localStorage.setItem('envVars', JSON.stringify(envVars));
+  }, [envVars]);
   const [mediaUrl, setMediaUrl] = useState("");
   const [mediaType, setMediaType] = useState<"image" | "video">("image");
   const [isGeneratingMedia, setIsGeneratingMedia] = useState(false);
@@ -833,7 +840,8 @@ export default function App() {
   };
 
   const simulateExecution = (command: string) => {
-    addLog("terminal", `$ ${command}`);
+    const envString = Object.entries(envVars).map(([k, v]) => `${k}=${v}`).join(' ');
+    addLog("terminal", `$ ${envString} ${command}`);
     setTimeout(() => {
       if (command.startsWith("cd ")) {
         const newDir = command.replace("cd ", "").trim();
@@ -844,7 +852,7 @@ export default function App() {
       } else {
         addLog(
           "terminal",
-          `[Simulated Output for: ${command}]\nExecution successful.`,
+          `[Simulated Output for: ${envString} ${command}]\nExecution successful.`,
         );
       }
       addLog("system", "Step completed.", "success");
@@ -1020,6 +1028,8 @@ export default function App() {
             executorStatus={executorStatus}
             reviewerStatus={reviewerStatus}
             sandboxStatus={sandboxStatus}
+            envVars={envVars}
+            setEnvVars={setEnvVars}
           />
         )}
 
