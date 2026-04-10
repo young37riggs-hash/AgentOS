@@ -14,6 +14,7 @@ import {
   ChevronRight,
   ChevronLeft,
   Maximize2,
+  Menu,
   Minimize2,
   Zap,
   Box,
@@ -43,8 +44,11 @@ import {
   Send,
   Share2,
   Copy,
+  ShieldAlert,
+  X,
 } from "lucide-react";
 import { runPlanner, runExecutor, runReviewer, runChat, generateMediaImage, generateMediaVideo, runExplorer, runOrchestrator } from "./lib/gemini";
+import { sandboxManager } from "./lib/sandbox";
 import { memoryCore, MemoryResult } from "./lib/memory";
 import { LiveVideoChat } from "./lib/live";
 import { motion, AnimatePresence } from "motion/react";
@@ -105,6 +109,7 @@ export default function App() {
   const [isExploring, setIsExploring] = useState(false);
   const [orchestratorLogs, setOrchestratorLogs] = useState<{task: string, subtasks: string[]}[]>([]);
   const [isOrchestrating, setIsOrchestrating] = useState(false);
+  const [chatLogs, setChatLogs] = useState<{role: 'user' | 'agent', text: string}[]>([]);
   const [liveStatus, setLiveStatus] = useState("Offline");
   const [liveTranscripts, setLiveTranscripts] = useState<{text: string, role: 'user' | 'model'}[]>([]);
   const [liveLogs, setLiveLogs] = useState<{message: string, type: 'info' | 'success' | 'error'}[]>([]);
@@ -126,6 +131,8 @@ export default function App() {
     const saved = localStorage.getItem("isExplorerWidgetOpen");
     return saved ? JSON.parse(saved) : true;
   });
+  const [mobileActiveTab, setMobileActiveTab] = useState<'logs' | 'status' | 'explorer'>('logs');
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     localStorage.setItem("leftSidebarCollapsed", JSON.stringify(leftSidebarCollapsed));
@@ -196,7 +203,7 @@ export default function App() {
     return saved ? JSON.parse(saved) : [];
   });
   const [newTaskText, setNewTaskText] = useState("");
-  const [orchestratorView, setOrchestratorView] = useState<'board' | 'calendar'>('board');
+  const [orchestratorView, setOrchestratorView] = useState<'board' | 'calendar' | 'split'>('board');
   const [boardGrouping, setBoardGrouping] = useState<'status' | 'priority'>('status');
   const [taskSearchQuery, setTaskSearchQuery] = useState("");
   const [taskTemplates, setTaskTemplates] = useState<{name: string, task: Partial<Task>}[]>(() => {
@@ -326,14 +333,14 @@ export default function App() {
 
   const handleChatSubmit = async (text: string) => {
     if (!text.trim()) return;
-    const newLogs = [...chatLogs, { role: 'user', text }];
+    const newLogs = [...chatLogs, { role: 'user' as const, text }];
     setChatLogs(newLogs);
     const history = newLogs.map(l => `${l.role}: ${l.text}`).join('\n');
     try {
       const response = await runChat(text, history);
-      setChatLogs([...newLogs, { role: 'agent', text: response }]);
+      setChatLogs([...newLogs, { role: 'agent' as const, text: response }]);
     } catch (e) {
-      setChatLogs([...newLogs, { role: 'agent', text: 'Error connecting to chat agent.' }]);
+      setChatLogs([...newLogs, { role: 'agent' as const, text: 'Error connecting to chat agent.' }]);
     }
   };
 
@@ -360,7 +367,7 @@ export default function App() {
     if (!query.trim()) return;
     setIsExploring(true);
     try {
-      const result = await runExplorer(query);
+      const result = await runExplorer(query, setSandboxStatus, addLog);
       setExplorerLogs(prev => [...prev, { query, result }]);
       
       // Parse handoff
@@ -569,12 +576,32 @@ export default function App() {
     volumes: string;
     output: string;
     exitCode: number;
+    logs?: string[];
+  } | null>(null);
+
+  const [pendingCommand, setPendingCommand] = useState<{
+    command: string;
+    image: string;
+    networkDisabled: boolean;
+    volumes: string[];
+    verdict: string;
+    audit: string;
   } | null>(null);
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    // Only auto-scroll if user is near bottom or if it's a user message
+    const container = document.getElementById('agentos-logs-container');
+    if (container) {
+      const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 200;
+      if (isNearBottom || (logs.length > 0 && logs[logs.length - 1].type === 'user')) {
+        container.scrollTo({
+          top: container.scrollHeight,
+          behavior: 'smooth'
+        });
+      }
+    }
   }, [logs]);
 
   const addLog = (
@@ -678,7 +705,7 @@ export default function App() {
         setIsExploring(true);
         addLog("system", `Running Explorer Agent for query: ${query}`);
         try {
-          const explorerResult = await runExplorer(query);
+          const explorerResult = await runExplorer(query, setSandboxStatus, addLog);
           addLog("system", `Explorer returned results. Feeding back to Planner.`);
           setExplorerLogs(prev => [...prev, { query, result: explorerResult }]);
           
@@ -784,46 +811,27 @@ export default function App() {
           "error",
         );
         addLog("system", "Halting blueprint for safety.", "error");
-      } else {
-        // --- DOCKER SANDBOX PHASE ---
-        setSandboxStatus("working");
-        addLog("system", `Provisioning ephemeral Docker container (${image})...`);
-        
-        await new Promise(r => setTimeout(r, 1200)); // Simulate container spin-up
-        const containerId = `cnt_${Math.random().toString(36).substring(2, 8)}`;
-        addLog("sandbox", `Container ${containerId} (${image}) online. Network: ${networkDisabled ? 'Disabled' : 'Enabled'}. Executing command...`);
-        
-        await new Promise(r => setTimeout(r, 1500)); // Simulate execution
-        
-        setSandboxData({
-          containerId,
+        setIsRunning(false);
+      } else if (verdict === "REQUIRES_USER_CONSENT") {
+        addLog(
+          "reviewer",
+          `Auditor flagged command as modifying. Choice required: Run in Sandbox or Run on Host.`,
+          "warning",
+        );
+        setPendingCommand({
+          command,
           image,
-          network: networkDisabled ? "Disabled" : "Enabled",
-          volumes,
-          output: `$ ${command}\n> Execution successful.\n> No destructive side-effects detected.`,
-          exitCode: 0
+          networkDisabled,
+          volumes: volumes === "none" ? [] : volumes.split(","),
+          verdict,
+          audit
         });
-        
-        addLog("sandbox", `Command tested successfully. Destroying container ${containerId}...`, "success");
-        setSandboxStatus("done");
-
-        // --- HOST EXECUTION PHASE ---
-        if (verdict === "REQUIRES_USER_CONSENT") {
-          addLog(
-            "reviewer",
-            `Auditor flagged command as modifying. Requires user consent to run on host: \`${command}\``,
-            "warning",
-          );
-          addLog(
-            "system",
-            "Awaiting user consent... (Simulation: auto-approving for demo purposes)",
-            "warning",
-          );
-          setTimeout(() => simulateExecution(command), 1500);
-        } else if (verdict === "APPROVED") {
-          addLog("reviewer", "Command Approved and Sandboxed. Executing on host...", "success");
-          simulateExecution(command);
-        }
+        // We don't setIsRunning(false) yet because we are waiting for user input
+      } else {
+        // APPROVED - Run in sandbox first, then host
+        await executeInSandbox(command, image, networkDisabled, volumes === "none" ? [] : volumes.split(","));
+        addLog("reviewer", "Command Approved and Sandboxed. Executing on host...", "success");
+        simulateExecution(command);
       }
     } catch (error: any) {
       addLog("system", `Critical Error: ${error.message}`, "error");
@@ -839,6 +847,60 @@ export default function App() {
     }
   };
 
+  const executeInSandbox = async (command: string, image: string, networkDisabled: boolean, volumes: string[]) => {
+    setSandboxStatus("working");
+    addLog("system", `Provisioning ephemeral Docker container (${image})...`);
+    
+    try {
+      const result = await sandboxManager.execute(command, {
+        image,
+        networkDisabled,
+        volumes
+      });
+
+      setSandboxData({
+        containerId: `cnt_${Math.random().toString(36).substring(2, 8)}`,
+        image,
+        network: networkDisabled ? "Disabled" : "Enabled",
+        volumes: volumes.length > 0 ? volumes.join(", ") : "none",
+        output: result.stdout || result.stderr || "No output",
+        exitCode: result.exitCode,
+        logs: result.logs
+      });
+
+      result.logs.forEach(log => addLog("sandbox", log));
+      
+      if (result.exitCode === 0) {
+        addLog("sandbox", `Command tested successfully in sandbox.`, "success");
+      } else {
+        addLog("sandbox", `Command failed in sandbox with exit code ${result.exitCode}.`, "error");
+      }
+      setSandboxStatus("done");
+      return result;
+    } catch (error: any) {
+      addLog("system", `Sandbox Execution Error: ${error.message}`, "error");
+      setSandboxStatus("error");
+      throw error;
+    }
+  };
+
+  const handleSandboxChoice = async (choice: 'sandbox' | 'host' | 'cancel') => {
+    if (!pendingCommand) return;
+    const { command, image, networkDisabled, volumes } = pendingCommand;
+    setPendingCommand(null);
+
+    if (choice === 'sandbox') {
+      addLog("system", "User chose to execute in Sandbox.");
+      await executeInSandbox(command, image, networkDisabled, volumes);
+      setIsRunning(false);
+    } else if (choice === 'host') {
+      addLog("system", "User chose to execute on Host.");
+      simulateExecution(command);
+    } else {
+      addLog("system", "Execution cancelled by user.", "warning");
+      setIsRunning(false);
+    }
+  };
   const simulateExecution = (command: string) => {
     const envString = Object.entries(envVars).map(([k, v]) => `${k}=${v}`).join(' ');
     addLog("terminal", `$ ${envString} ${command}`);
@@ -862,7 +924,58 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen bg-[#050505] text-gray-200 font-sans overflow-hidden selection:bg-emerald-500/30">
+    <div className="fixed inset-0 bg-[#050505] text-gray-200 font-sans overflow-hidden selection:bg-emerald-500/30 flex flex-col md:flex-row">
+      {/* MOBILE MENU OVERLAY */}
+      <AnimatePresence>
+        {isMobileMenuOpen && (
+          <motion.div 
+            initial={{ opacity: 0, x: -100 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -100 }}
+            className="fixed inset-0 z-[100] md:hidden flex"
+          >
+            <div className="w-64 bg-[#050505] border-r border-[#222] p-6 flex flex-col gap-6 shadow-2xl">
+              <div className="flex items-center justify-between mb-4">
+                <span className="text-xs font-bold text-gray-500 uppercase tracking-widest">Navigation</span>
+                <button onClick={() => setIsMobileMenuOpen(false)} className="p-2 hover:bg-white/5 rounded-lg"><X className="w-5 h-5 text-gray-500" /></button>
+              </div>
+              
+              <div className="space-y-2">
+                {[
+                  { id: 'agentos', icon: Terminal, label: 'AgentOS Core', color: 'text-emerald-400' },
+                  { id: 'chat', icon: MessageSquare, label: 'Conversational', color: 'text-blue-400' },
+                  { id: 'orchestrator', icon: Network, label: 'Orchestrator', color: 'text-purple-400' },
+                  { id: 'explorer', icon: Globe, label: 'Explorer', color: 'text-orange-400' },
+                  { id: 'media', icon: ImageIcon, label: 'Media Studio', color: 'text-pink-400' },
+                  { id: 'live', icon: Video, label: 'Live Intelligence', color: 'text-red-400' },
+                  { id: 'github', icon: Box, label: 'GitHub Agent', color: 'text-indigo-400' },
+                ].map((m) => (
+                  <button
+                    key={m.id}
+                    onClick={() => { setMode(m.id as AppMode); setIsMobileMenuOpen(false); }}
+                    className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${mode === m.id ? 'bg-white/5 border border-white/10' : 'text-gray-500 hover:text-gray-300'}`}
+                  >
+                    <m.icon className={`w-5 h-5 ${mode === m.id ? m.color : ''}`} />
+                    <span className={`text-sm font-medium ${mode === m.id ? 'text-white' : ''}`}>{m.label}</span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="mt-auto pt-6 border-t border-[#222]">
+                <button 
+                  onClick={saveState}
+                  className="w-full flex items-center gap-3 p-3 text-gray-400 hover:text-white"
+                >
+                  <Save className="w-5 h-5" />
+                  <span className="text-sm">Save State</span>
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 bg-black/60 backdrop-blur-sm" onClick={() => setIsMobileMenuOpen(false)} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* 3D-ish Mascot / Coach */}
       <AnimatePresence>
         <motion.div 
@@ -924,8 +1037,10 @@ export default function App() {
 
       <MusicPlayer />
 
+      {/* MOBILE NAV BAR (Removed for simplicity) */}
+
       {/* LEFT NAV: Mode Switcher */}
-      <div className="w-16 bg-[#050505] border-r border-[#222] flex flex-col items-center py-6 gap-6 flex-shrink-0 z-50 glass-panel !bg-black/40">
+      <div className="hidden md:flex w-16 bg-[#050505] border-r border-[#222] flex-col items-center py-6 gap-6 flex-shrink-0 z-50 glass-panel !bg-black/40">
         <div className="w-10 h-10 bg-emerald-500 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-900/20 mb-4 group cursor-pointer relative">
           <Brain className="w-6 h-6 text-white group-hover:scale-110 transition-transform" />
           <div className="absolute inset-0 bg-white/20 rounded-xl opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -986,7 +1101,7 @@ export default function App() {
       <motion.div 
         animate={{ width: leftSidebarCollapsed ? 0 : 256, opacity: leftSidebarCollapsed ? 0 : 1 }}
         transition={{ type: "spring", stiffness: 300, damping: 30 }}
-        className="bg-[#111] border-r border-[#222] flex flex-col flex-shrink-0 overflow-y-auto custom-scrollbar glass-panel !bg-black/20 relative"
+        className="hidden md:flex bg-[#111] border-r border-[#222] flex-col flex-shrink-0 overflow-y-auto custom-scrollbar glass-panel !bg-black/20 relative"
       >
         <div className="p-4 h-full flex flex-col min-w-[256px]">
           <div className="flex items-center justify-between mb-8">
@@ -1129,11 +1244,22 @@ export default function App() {
     )}
 
       {/* MAIN CONTENT */}
-      <div className="flex-1 flex flex-col min-w-0 relative bg-[#050505]">
-        {/* TOP BAR */}
-        <div className="h-14 border-b border-[#222] flex items-center justify-between px-6 glass-panel !bg-black/40 z-10">
-          <div className="flex items-center gap-4">
+      <div className="flex-1 flex flex-col min-w-0 relative bg-[#050505] overflow-hidden">
+        {/* TOP BAR / HEADER */}
+        <div className="h-14 border-b border-[#222] flex items-center justify-between px-4 md:px-6 glass-panel !bg-black/40 z-50 flex-shrink-0">
+          <div className="flex items-center gap-3 md:gap-4">
+            <button 
+              onClick={() => setIsMobileMenuOpen(true)}
+              className="md:hidden p-2 text-gray-400 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
             <div className="flex items-center gap-2">
+              <Brain className="w-5 h-5 text-emerald-400" />
+              <span className="font-bold tracking-wider text-xs md:text-sm uppercase metallic-text">AgentOS</span>
+            </div>
+            <div className="hidden sm:block h-4 w-[1px] bg-[#333]" />
+            <div className="hidden sm:flex items-center gap-2">
               <motion.div 
                 animate={{ scale: [1, 1.2, 1], opacity: [0.5, 1, 0.5] }}
                 transition={{ duration: 2, repeat: Infinity }}
@@ -1141,138 +1267,232 @@ export default function App() {
               />
               <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-[0.2em] metallic-text">System Operational</span>
             </div>
-            <div className="h-4 w-[1px] bg-[#333]" />
-            <div className="text-[10px] text-gray-500 font-mono uppercase tracking-widest">
-              {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-            </div>
           </div>
           
-          <div className="flex items-center gap-4">
-            <div className="flex -space-x-2">
-              <div className="w-8 h-8 rounded-full glass-panel border-emerald-500/30 flex items-center justify-center text-[10px] text-emerald-400 font-bold shadow-[0_0_10px_rgba(16,185,129,0.1)]" title="Planner Agent">P</div>
-              <div className="w-8 h-8 rounded-full glass-panel border-blue-500/30 flex items-center justify-center text-[10px] text-blue-400 font-bold shadow-[0_0_10px_rgba(59,130,246,0.1)]" title="Executor Agent">E</div>
-              <div className="w-8 h-8 rounded-full glass-panel border-purple-500/30 flex items-center justify-center text-[10px] text-purple-400 font-bold shadow-[0_0_10px_rgba(168,85,247,0.1)]" title="Reviewer Agent">R</div>
+          <div className="flex items-center gap-2 md:gap-4">
+            <div className="flex items-center gap-2 px-2 py-1 bg-white/5 rounded-lg border border-white/10">
+              <div className={`w-1.5 h-1.5 rounded-full ${isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-gray-600'}`} />
+              <span className="text-[9px] md:text-[10px] font-mono text-gray-400 uppercase tracking-widest">{mode}</span>
             </div>
-            <button className="p-2 text-gray-500 hover:text-white transition-colors hover:bg-white/5 rounded-lg"><Maximize2 className="w-4 h-4" /></button>
+            <button className="hidden sm:block p-2 text-gray-500 hover:text-white transition-colors hover:bg-white/5 rounded-lg"><Maximize2 className="w-4 h-4" /></button>
           </div>
         </div>
 
         {/* AGENTOS MODE */}
         {mode === 'agentos' && (
-          <div className="flex-1 flex flex-col min-w-0 relative">
-            <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar">
-              <AnimatePresence mode="popLayout">
-                {logs.length === 0 ? (
-                  <motion.div 
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    className="h-full flex flex-col items-center justify-center text-gray-600 opacity-30"
-                  >
-                    <Terminal className="w-20 h-20 mb-4 stroke-[1px]" />
-                    <p className="text-sm uppercase tracking-[0.3em]">Awaiting Neural Uplink</p>
-                  </motion.div>
-                ) : (
-                  logs.map((log) => (
-                    <motion.div
-                      key={log.id}
-                      initial={{ opacity: 0, x: -20, scale: 0.95 }}
-                      animate={{ opacity: 1, x: 0, scale: 1 }}
-                      className={`flex gap-4 group ${log.type === 'user' ? 'justify-end' : ''}`}
-                    >
-                      {log.type !== 'user' && (
-                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 glass-panel border-white/5 shadow-lg ${
-                          log.type === 'planner' ? 'text-emerald-400' :
-                          log.type === 'executor' ? 'text-blue-400' :
-                          log.type === 'reviewer' ? 'text-purple-400' :
-                          log.type === 'sandbox' ? 'text-orange-400' :
-                          'text-gray-400'
-                        }`}>
-                          {log.type === 'planner' && <Brain className="w-5 h-5" />}
-                          {log.type === 'executor' && <Cpu className="w-5 h-5" />}
-                          {log.type === 'reviewer' && <ShieldCheck className="w-5 h-5" />}
-                          {log.type === 'sandbox' && <Box className="w-5 h-5" />}
-                          {log.type === 'terminal' && <Terminal className="w-5 h-5" />}
-                          {log.type === 'system' && <Activity className="w-5 h-5" />}
+          <div className="flex-1 flex flex-col min-h-0 relative overflow-hidden">
+            <div className="flex-1 flex flex-col md:flex-row min-h-0">
+              {/* MAIN SCROLLABLE AREA */}
+              <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+                <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar" id="agentos-logs-container">
+                  {/* MOBILE STATUS SUMMARY (Compartmentalized Section) */}
+                  <div className="md:hidden">
+                    <div className="glass-panel border-white/10 p-4 rounded-2xl bg-black/40 shadow-xl">
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-2">
+                          <Activity className="w-4 h-4 text-emerald-500" />
+                          <h3 className="text-[10px] font-bold uppercase tracking-widest text-gray-300">System Pulse</h3>
                         </div>
-                      )}
-                      <div className={`max-w-[85%] rounded-2xl px-5 py-3.5 text-sm glass-panel border-white/5 shadow-xl ${
-                        log.type === 'user' ? 'bg-emerald-500/10 !border-emerald-500/20 text-emerald-100' : 
-                        log.type === 'terminal' ? 'bg-black/60 font-mono text-emerald-400 !border-emerald-500/20' :
-                        'bg-white/5 text-gray-300'
-                      }`}>
-                        <div className="flex items-center justify-between mb-2 gap-6">
-                          <span className={`text-[10px] uppercase tracking-[0.2em] font-bold opacity-60 ${
-                            log.type === 'planner' ? 'text-emerald-400' :
-                            log.type === 'executor' ? 'text-blue-400' :
-                            log.type === 'reviewer' ? 'text-purple-400' :
-                            'text-gray-400'
-                          }`}>
-                            {log.type}
-                          </span>
-                          <span className="text-[10px] opacity-30 font-mono">
-                            {log.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                          </span>
-                        </div>
-                        <div className={`${log.status === 'error' ? 'text-red-400' : log.status === 'success' ? 'text-emerald-400' : ''}`}>
-                          {log.type === 'terminal' ? (
-                            <pre className="whitespace-pre-wrap break-all">{log.content}</pre>
-                          ) : (
-                            <MarkdownRenderer content={log.content} />
-                          )}
+                        <div className="flex gap-1">
+                          <div className={`w-1.5 h-1.5 rounded-full ${plannerStatus === 'idle' ? 'bg-gray-700' : 'bg-emerald-500 shadow-[0_0_5px_rgba(16,185,129,0.5)]'}`} />
+                          <div className={`w-1.5 h-1.5 rounded-full ${executorStatus === 'idle' ? 'bg-gray-700' : 'bg-blue-500 shadow-[0_0_5px_rgba(59,130,246,0.5)]'}`} />
                         </div>
                       </div>
-                    </motion.div>
-                  ))
-                )}
-              </AnimatePresence>
-              
-              {isRunning && (
-                <motion.div 
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="flex items-center gap-4 text-emerald-500/60 text-[10px] font-bold uppercase tracking-[0.2em] ml-14"
-                >
-                  <div className="flex gap-1.5">
-                    <motion.div animate={{ scale: [1, 1.5, 1], opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.5 }} className="w-2 h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
-                    <motion.div animate={{ scale: [1, 1.5, 1], opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.5, delay: 0.3 }} className="w-2 h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
-                    <motion.div animate={{ scale: [1, 1.5, 1], opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.5, delay: 0.6 }} className="w-2 h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
-                  </div>
-                  <span className="metallic-text">Neural Processing Active</span>
-                </motion.div>
-              )}
-              <div ref={logsEndRef} />
-            </div>
-
-            <div className="p-6 pt-0">
-              <div className="relative group max-w-4xl mx-auto w-full">
-                <div className="absolute -inset-1 bg-gradient-to-r from-emerald-500/20 via-blue-500/20 to-purple-500/20 rounded-2xl blur opacity-25 group-focus-within:opacity-100 transition-opacity duration-500" />
-                <div className="relative flex items-center glass-panel !bg-black/60 border-white/10 rounded-2xl p-2 shadow-2xl">
-                  <div className="pl-4 text-emerald-500/50">
-                    <ChevronRight className="w-5 h-5" />
-                  </div>
-                  <input
-                    type="text"
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleRunCycle()}
-                    placeholder={isRunning ? "System busy..." : getPlaceholder()}
-                    disabled={isRunning}
-                    className="flex-1 bg-transparent border-none focus:ring-0 px-4 py-3 text-sm text-gray-200 placeholder:text-gray-600 font-sans"
-                  />
-                  <button
-                    onClick={() => handleRunCycle()}
-                    disabled={isRunning || !input.trim()}
-                    className="p-3 bg-emerald-500 text-white rounded-xl hover:bg-emerald-400 disabled:opacity-50 disabled:hover:bg-emerald-500 transition-all shadow-lg shadow-emerald-900/40 group/btn overflow-hidden relative"
-                  >
-                    <div className="relative z-10">
-                      {isRunning ? <Square className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current" />}
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="bg-white/5 p-2 rounded-xl border border-white/5">
+                          <div className="text-[8px] text-gray-500 uppercase mb-1">Planner</div>
+                          <div className="text-[10px] text-emerald-400 font-bold truncate">{plannerStatus}</div>
+                        </div>
+                        <div className="bg-white/5 p-2 rounded-xl border border-white/5">
+                          <div className="text-[8px] text-gray-500 uppercase mb-1">Executor</div>
+                          <div className="text-[10px] text-blue-400 font-bold truncate">{executorStatus}</div>
+                        </div>
+                      </div>
                     </div>
+                  </div>
+
+                  <AnimatePresence mode="popLayout">
+                    {logs.length === 0 ? (
+                      <motion.div 
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        className="h-full flex flex-col items-center justify-center text-gray-600 opacity-30 py-20"
+                      >
+                        <Terminal className="w-16 h-16 md:w-20 md:h-20 mb-4 stroke-[1px]" />
+                        <p className="text-xs md:text-sm uppercase tracking-[0.3em]">Awaiting Neural Uplink</p>
+                      </motion.div>
+                    ) : (
+                      logs.map((log) => (
+                        <motion.div
+                          key={log.id}
+                          initial={{ opacity: 0, x: -10, scale: 0.98 }}
+                          animate={{ opacity: 1, x: 0, scale: 1 }}
+                          className={`flex gap-3 md:gap-4 group ${log.type === 'user' ? 'justify-end' : ''}`}
+                        >
+                          {log.type !== 'user' && (
+                            <div className={`w-8 h-8 md:w-10 md:h-10 rounded-xl flex items-center justify-center flex-shrink-0 glass-panel border-white/5 shadow-lg ${
+                              log.type === 'planner' ? 'text-emerald-400' :
+                              log.type === 'executor' ? 'text-blue-400' :
+                              log.type === 'reviewer' ? 'text-purple-400' :
+                              log.type === 'sandbox' ? 'text-orange-400' :
+                              'text-gray-400'
+                            }`}>
+                              {log.type === 'planner' && <Brain className="w-4 h-4 md:w-5 md:h-5" />}
+                              {log.type === 'executor' && <Cpu className="w-4 h-4 md:w-5 md:h-5" />}
+                              {log.type === 'reviewer' && <ShieldCheck className="w-4 h-4 md:w-5 md:h-5" />}
+                              {log.type === 'sandbox' && <Box className="w-4 h-4 md:w-5 md:h-5" />}
+                              {log.type === 'terminal' && <Terminal className="w-4 h-4 md:w-5 md:h-5" />}
+                              {log.type === 'system' && <Activity className="w-4 h-4 md:w-5 md:h-5" />}
+                            </div>
+                          )}
+                          <div className={`max-w-[92%] md:max-w-[85%] rounded-2xl px-4 py-3 md:px-5 md:py-3.5 text-xs md:text-sm glass-panel border-white/5 shadow-xl ${
+                            log.type === 'user' ? 'bg-emerald-500/10 !border-emerald-500/20 text-emerald-100' : 
+                            log.type === 'terminal' ? 'bg-black/60 font-mono text-emerald-400 !border-emerald-500/20' :
+                            'bg-white/5 text-gray-300'
+                          }`}>
+                            <div className="flex items-center justify-between mb-2 gap-6">
+                              <span className={`text-[9px] md:text-[10px] uppercase tracking-[0.2em] font-bold opacity-60 ${
+                                log.type === 'planner' ? 'text-emerald-400' :
+                                log.type === 'executor' ? 'text-blue-400' :
+                                log.type === 'reviewer' ? 'text-purple-400' :
+                                'text-gray-400'
+                              }`}>
+                                {log.type}
+                              </span>
+                              <span className="text-[8px] md:text-[9px] opacity-30 font-mono">
+                                {log.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                            </div>
+                            <div className={`${log.status === 'error' ? 'text-red-400' : log.status === 'success' ? 'text-emerald-400' : ''} leading-relaxed`}>
+                              {log.type === 'terminal' ? (
+                                <pre className="whitespace-pre-wrap break-all font-mono text-[10px] md:text-xs">{log.content}</pre>
+                              ) : (
+                                <MarkdownRenderer content={log.content} />
+                              )}
+                            </div>
+                          </div>
+                        </motion.div>
+                      ))
+                    )}
+                  </AnimatePresence>
+                  
+                  {isRunning && (
                     <motion.div 
-                      animate={{ x: ["-100%", "100%"] }}
-                      transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-                      className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent"
-                    />
-                  </button>
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="flex items-center gap-4 text-emerald-500/60 text-[10px] font-bold uppercase tracking-[0.2em] ml-11 md:ml-14"
+                    >
+                      <div className="flex gap-1.5">
+                        <motion.div animate={{ scale: [1, 1.5, 1], opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.5 }} className="w-1.5 h-1.5 md:w-2 md:h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
+                        <motion.div animate={{ scale: [1, 1.5, 1], opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.5, delay: 0.3 }} className="w-1.5 h-1.5 md:w-2 md:h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
+                        <motion.div animate={{ scale: [1, 1.5, 1], opacity: [0.3, 1, 0.3] }} transition={{ repeat: Infinity, duration: 1.5, delay: 0.6 }} className="w-1.5 h-1.5 md:w-2 md:h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
+                      </div>
+                      <span className="metallic-text">Neural Processing Active</span>
+                    </motion.div>
+                  )}
+                  <div ref={logsEndRef} className="h-4" />
+                </div>
+
+                {/* STICKY INPUT AREA */}
+                <div className="p-4 md:p-6 bg-gradient-to-t from-[#050505] via-[#050505] to-transparent flex-shrink-0">
+                  <div className="relative group max-w-4xl mx-auto w-full">
+                    <div className="absolute -inset-1 bg-gradient-to-r from-emerald-500/20 via-blue-500/20 to-purple-500/20 rounded-2xl blur opacity-25 group-focus-within:opacity-100 transition-opacity duration-500" />
+                    <div className="relative flex items-center glass-panel !bg-black/80 border-white/10 rounded-2xl p-1.5 md:p-2 shadow-2xl">
+                      <div className="pl-3 md:pl-4 text-emerald-500/50">
+                        <ChevronRight className="w-4 h-4 md:w-5 md:h-5" />
+                      </div>
+                      <input
+                        type="text"
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleRunCycle()}
+                        placeholder={isRunning ? "System busy..." : getPlaceholder()}
+                        disabled={isRunning}
+                        className="flex-1 bg-transparent border-none focus:ring-0 px-3 md:px-4 py-2 md:py-3 text-xs md:text-sm text-gray-200 placeholder:text-gray-600 font-sans"
+                      />
+                      <button
+                        onClick={() => handleRunCycle()}
+                        disabled={isRunning || !input.trim()}
+                        className="p-2.5 md:p-3 bg-emerald-500 text-white rounded-xl hover:bg-emerald-400 disabled:opacity-50 disabled:hover:bg-emerald-500 transition-all shadow-lg shadow-emerald-900/40 group/btn overflow-hidden relative"
+                      >
+                        <div className="relative z-10">
+                          {isRunning ? <Square className="w-4 h-4 md:w-5 md:h-5 fill-current" /> : <Play className="w-4 h-4 md:w-5 md:h-5 fill-current" />}
+                        </div>
+                        <motion.div 
+                          animate={{ x: ["-100%", "100%"] }}
+                          transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+                          className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent"
+                        />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* STATUS SIDEBAR (Desktop only or hidden by default on mobile) */}
+              <div className="hidden md:flex w-80 border-l border-[#222] flex-col glass-panel !bg-black/20">
+                <div className="p-4 border-b border-[#222] flex items-center justify-between">
+                  <h3 className="text-[10px] font-bold uppercase tracking-widest text-gray-500">Agent Status</h3>
+                  <div className="flex gap-1">
+                    <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                    <div className="w-2 h-2 rounded-full bg-blue-500" />
+                    <div className="w-2 h-2 rounded-full bg-purple-500" />
+                  </div>
+                </div>
+                <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
+                  <StatusIndicator label="Planner" status={plannerStatus} />
+                  <StatusIndicator label="Executor" status={executorStatus} />
+                  <StatusIndicator label="Auditor" status={reviewerStatus} />
+                  <StatusIndicator label="Sandbox" status={sandboxStatus} />
+
+                  <div className="pt-4 border-t border-[#222]">
+                    <h4 className="text-[9px] font-bold uppercase tracking-widest text-gray-600 mb-3">Active Pipeline</h4>
+                    <div className="space-y-3">
+                      {/* Reviewer Data */}
+                      <div className="glass-panel border-white/5 p-3 rounded-xl">
+                        <div className="flex items-center gap-2 mb-2">
+                          <ShieldCheck className="w-3 h-3 text-purple-400" />
+                          <span className="text-[9px] font-bold text-purple-400 uppercase">Audit Result</span>
+                        </div>
+                        {reviewerData ? (
+                          <div className="space-y-2">
+                            <div className={`text-[10px] font-bold px-2 py-1 rounded border ${
+                              reviewerData.verdict === 'APPROVED' ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' :
+                              reviewerData.verdict === 'REJECTED' ? 'bg-red-500/10 border-red-500/30 text-red-400' :
+                              'bg-orange-500/10 border-orange-500/30 text-orange-400'
+                            }`}>
+                              {reviewerData.verdict}
+                            </div>
+                            <p className="text-[9px] text-gray-400 leading-relaxed italic">"{reviewerData.audit}"</p>
+                          </div>
+                        ) : (
+                          <div className="text-[9px] text-gray-600 italic">No active audit</div>
+                        )}
+                      </div>
+
+                      {/* Sandbox Data */}
+                      <div className="glass-panel border-white/5 p-3 rounded-xl">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Box className="w-3 h-3 text-blue-400" />
+                          <span className="text-[9px] font-bold text-blue-400 uppercase">Sandbox Telemetry</span>
+                        </div>
+                        {sandboxData ? (
+                          <div className="space-y-1 text-[9px]">
+                            <div className="flex justify-between">
+                              <span className="text-gray-500">ID:</span>
+                              <span className="text-gray-300 font-mono">{sandboxData.containerId}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-gray-500">Exit:</span>
+                              <span className={sandboxData.exitCode === 0 ? "text-emerald-400" : "text-red-400"}>{sandboxData.exitCode}</span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="text-[9px] text-gray-600 italic">Sandbox idle</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1280,19 +1500,19 @@ export default function App() {
         )}
 
       {mode === 'chat' && (
-        <div className="flex-1 flex flex-col min-w-0 p-6 relative">
-          <div className="flex items-center justify-between mb-6">
-            <h2 className="text-xl font-bold text-blue-400 flex items-center gap-2 metallic-text"><MessageSquare className="w-6 h-6" /> Conversational Agent</h2>
-            <div className="flex gap-2">
+        <div className="flex-1 flex flex-col min-w-0 p-4 md:p-6 relative overflow-hidden">
+          <div className="flex items-center justify-between mb-4 md:mb-6">
+            <h2 className="text-lg md:text-xl font-bold text-blue-400 flex items-center gap-2 metallic-text"><MessageSquare className="w-5 h-5 md:w-6 md:h-6" /> Conversational Agent</h2>
+            <div className="hidden sm:flex gap-2">
               <div className="px-3 py-1 glass-panel border-blue-500/20 text-[10px] text-blue-400 font-bold uppercase tracking-widest">Neural Link: Active</div>
             </div>
           </div>
           
-          <div className="flex-1 overflow-y-auto space-y-4 mb-6 custom-scrollbar pr-2 min-h-0">
+          <div className="flex-1 overflow-y-auto space-y-4 mb-4 md:mb-6 custom-scrollbar pr-1 md:pr-2 min-h-0">
             {chatLogs.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-gray-600 opacity-30">
-                <MessageSquare className="w-20 h-20 mb-4 stroke-[1px]" />
-                <p className="text-sm uppercase tracking-[0.3em]">Awaiting Dialogue</p>
+                <MessageSquare className="w-16 h-16 md:w-20 md:h-20 mb-4 stroke-[1px]" />
+                <p className="text-xs md:text-sm uppercase tracking-[0.3em]">Awaiting Dialogue</p>
               </div>
             ) : (
               chatLogs.map((log, i) => (
@@ -1302,16 +1522,18 @@ export default function App() {
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   className={`flex ${log.role === 'user' ? 'justify-end' : 'justify-start'}`}
                 >
-                  <div className={`p-4 rounded-2xl max-w-[80%] glass-panel shadow-xl ${
+                  <div className={`p-3 md:p-4 rounded-2xl max-w-[90%] md:max-w-[80%] glass-panel shadow-xl ${
                     log.role === 'user' 
                       ? 'bg-blue-500/10 !border-blue-500/30 text-blue-100' 
                       : 'bg-white/5 !border-white/10 text-gray-300'
                   }`}>
-                    <div className="flex items-center justify-between mb-2 gap-4 opacity-40 text-[10px] font-bold uppercase tracking-widest">
+                    <div className="flex items-center justify-between mb-1 md:mb-2 gap-4 opacity-40 text-[9px] md:text-[10px] font-bold uppercase tracking-widest">
                       <span>{log.role === 'user' ? 'User' : 'AgentOS'}</span>
                       <span className="font-mono">01:22:22</span>
                     </div>
-                    {log.role === 'user' ? log.text : <MarkdownRenderer content={log.text} />}
+                    <div className="text-xs md:text-sm leading-relaxed">
+                      {log.role === 'user' ? log.text : <MarkdownRenderer content={log.text} />}
+                    </div>
                   </div>
                 </motion.div>
               ))
@@ -1320,12 +1542,12 @@ export default function App() {
           
           <div className="relative group max-w-4xl mx-auto w-full">
             <div className="absolute -inset-1 bg-gradient-to-r from-blue-500/20 to-cyan-500/20 rounded-2xl blur opacity-25 group-focus-within:opacity-100 transition-opacity duration-500" />
-            <div className="relative flex items-center glass-panel !bg-black/60 border-white/10 rounded-2xl p-2 shadow-2xl">
+            <div className="relative flex items-center glass-panel !bg-black/60 border-white/10 rounded-2xl p-1.5 md:p-2 shadow-2xl">
               <input 
                 type="text" 
                 id="chatInput" 
                 placeholder="Synchronize neural patterns..." 
-                className="flex-1 bg-transparent border-none focus:ring-0 px-4 py-3 text-sm text-gray-200 placeholder:text-gray-600 font-sans" 
+                className="flex-1 bg-transparent border-none focus:ring-0 px-3 md:px-4 py-2 md:py-3 text-xs md:text-sm text-gray-200 placeholder:text-gray-600 font-sans" 
                 onKeyDown={(e) => { 
                   if (e.key === 'Enter') { 
                     handleChatSubmit(e.currentTarget.value); 
@@ -1333,8 +1555,8 @@ export default function App() {
                   } 
                 }} 
               />
-              <button className="p-3 bg-blue-500 text-white rounded-xl hover:bg-blue-400 transition-all shadow-lg shadow-blue-900/40">
-                <Send className="w-5 h-5" />
+              <button className="p-2.5 md:p-3 bg-blue-500 text-white rounded-xl hover:bg-blue-400 transition-all shadow-lg shadow-blue-900/40">
+                <Send className="w-4 h-4 md:w-5 md:h-5" />
               </button>
             </div>
           </div>
@@ -1498,6 +1720,12 @@ export default function App() {
                     >
                       Calendar
                     </button>
+                    <button 
+                      onClick={() => setOrchestratorView('split')}
+                      className={`px-4 py-1.5 text-[10px] font-bold uppercase tracking-widest rounded-lg transition-all ${orchestratorView === 'split' ? 'bg-purple-500/20 text-purple-400 shadow-inner' : 'text-gray-500 hover:text-gray-300'}`}
+                    >
+                      Split
+                    </button>
                   </div>
                 </div>
                 <div className="flex gap-2 w-full md:w-auto">
@@ -1554,7 +1782,8 @@ export default function App() {
                 </div>
               </div>
 
-              {orchestratorView === 'board' ? (
+              {(() => {
+                const renderBoard = () => (
                 <DragDropContext onDragEnd={onDragEnd}>
                   <div className="flex-1 flex gap-6 overflow-x-auto pb-4 custom-scrollbar">
                     {(boardGrouping === 'status' ? (['todo', 'in-progress', 'done'] as const) : (['high', 'medium', 'low'] as const)).map(group => (
@@ -1630,10 +1859,13 @@ export default function App() {
                                               title="Assigned Agent"
                                             >
                                               <option value="">No Agent</option>
-                                              <option value="agentos">AgentOS</option>
+                                              <option value="planner">Planner</option>
+                                              <option value="executor">Executor</option>
+                                              <option value="reviewer">Reviewer</option>
                                               <option value="explorer">Explorer</option>
-                                              <option value="chat">Chat</option>
                                               <option value="media">Media</option>
+                                              <option value="chat">Chat</option>
+                                              <option value="live">Live</option>
                                             </select>
 
                                             <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-gray-500 bg-black/40 border border-white/10 rounded-lg px-2 py-1" title="Due Date">
@@ -1703,17 +1935,19 @@ export default function App() {
                     ))}
                   </div>
                 </DragDropContext>
-              ) : (
-                <div className="flex-1 overflow-y-auto custom-scrollbar pr-2">
-                  <div className="grid grid-cols-7 gap-2">
-                    {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => (
+              );
+
+              const renderCalendar = (isSplit = false) => (
+                <div className={`flex-1 overflow-y-auto custom-scrollbar pr-2 ${isSplit ? 'max-h-full' : ''}`}>
+                  <div className={`grid gap-2 ${isSplit ? 'grid-cols-1' : 'grid-cols-7'}`}>
+                    {!isSplit && ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => (
                       <div key={day} className="p-3 text-center text-[10px] font-bold uppercase tracking-[0.2em] text-gray-500 glass-panel !bg-black/40 border-white/5 rounded-xl">
                         {day}
                       </div>
                     ))}
-                    {Array.from({ length: 35 }).map((_, i) => {
+                    {Array.from({ length: isSplit ? 14 : 35 }).map((_, i) => {
                       const date = new Date();
-                      date.setDate(date.getDate() + i - date.getDay());
+                      date.setDate(date.getDate() + i - (isSplit ? 0 : date.getDay()));
                       const dateStr = format(date, 'yyyy-MM-dd');
                       const dayTasks = tasks.filter(t => t.dueDate === dateStr && (t.text.toLowerCase().includes(taskSearchQuery.toLowerCase()) || t.id.toLowerCase().includes(taskSearchQuery.toLowerCase())));
                       const isToday = format(date, 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd');
@@ -1721,10 +1955,11 @@ export default function App() {
                         <motion.div 
                           key={i} 
                           whileHover={{ scale: 1.02, zIndex: 10 }}
-                          className={`min-h-[120px] p-3 glass-panel !bg-black/20 border-white/5 rounded-2xl transition-all hover:!bg-black/40 group ${isToday ? '!border-purple-500/30 shadow-[0_0_15px_rgba(168,85,247,0.1)]' : ''}`}
+                          className={`p-3 glass-panel !bg-black/20 border-white/5 rounded-2xl transition-all hover:!bg-black/40 group ${isToday ? '!border-purple-500/30 shadow-[0_0_15px_rgba(168,85,247,0.1)]' : ''} ${isSplit ? 'min-h-[80px]' : 'min-h-[120px]'}`}
                         >
-                          <div className={`text-xs font-bold mb-2 ${isToday ? 'text-purple-400' : 'text-gray-600'}`}>
-                            {format(date, 'd')}
+                          <div className={`text-xs font-bold mb-2 flex justify-between items-center ${isToday ? 'text-purple-400' : 'text-gray-600'}`}>
+                            <span>{format(date, 'd')}</span>
+                            {isSplit && <span className="text-[8px] uppercase tracking-widest opacity-50">{format(date, 'EEE')}</span>}
                           </div>
                           <div className="space-y-1.5">
                             {dayTasks.map(task => (
@@ -1738,7 +1973,28 @@ export default function App() {
                     })}
                   </div>
                 </div>
-              )}
+              );
+
+              return (
+                <div className="flex-1 flex flex-col gap-6 overflow-hidden">
+                  {orchestratorView === 'board' && renderBoard()}
+                  {orchestratorView === 'calendar' && renderCalendar()}
+                  {orchestratorView === 'split' && (
+                    <div className="flex-1 flex gap-6 overflow-hidden">
+                      <div className="flex-[3] flex flex-col min-w-0">
+                        {renderBoard()}
+                      </div>
+                      <div className="flex-1 flex flex-col min-w-[280px] border-l border-white/5 pl-6">
+                        <h4 className="text-[10px] font-bold text-gray-500 uppercase tracking-[0.2em] mb-4 flex items-center gap-2">
+                          <CalendarIcon className="w-3 h-3" /> Upcoming Schedule
+                        </h4>
+                        {renderCalendar(true)}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             </div>
 
             {/* Orchestrator AI Section */}
@@ -2111,9 +2367,9 @@ export default function App() {
               color="border-blue-500/50"
               extraLogs={
                 <div className="space-y-1">
-                  <div className="flex justify-between"><span>Container ID:</span> <span className="text-blue-400">ae92-f12</span></div>
-                  <div className="flex justify-between"><span>Network Isolation:</span> <span className="text-emerald-400">Enabled</span></div>
-                  <div className="flex justify-between"><span>Runtime:</span> <span className="text-blue-400">Node.js 20</span></div>
+                  <div className="flex justify-between"><span>Container ID:</span> <span className="text-blue-400">{sandboxData?.containerId || "N/A"}</span></div>
+                  <div className="flex justify-between"><span>Network:</span> <span className={sandboxData?.network === "Disabled" ? "text-emerald-400" : "text-orange-400"}>{sandboxData?.network || "N/A"}</span></div>
+                  <div className="flex justify-between"><span>Image:</span> <span className="text-blue-400">{sandboxData?.image || "N/A"}</span></div>
                 </div>
               }
             >
@@ -2154,9 +2410,11 @@ export default function App() {
       )}
 
       {/* PERSISTENT EXPLORER WIDGET */}
-      <div className={`fixed top-0 right-0 h-full z-50 transition-all duration-300 ease-in-out ${isExplorerWidgetOpen ? 'w-80' : 'w-0'}`}>
+      <div className={`fixed top-0 right-0 h-full z-50 transition-all duration-300 ease-in-out ${
+        isExplorerWidgetOpen ? 'w-full md:w-80' : 'w-0'
+      } ${mobileActiveTab !== 'explorer' ? 'hidden md:block' : 'block'}`}>
         <div className={`h-full glass-panel border-l border-white/10 flex flex-col shadow-2xl relative ${!isExplorerWidgetOpen && 'invisible'}`}>
-          <div className="p-6 border-b border-white/10 flex items-center justify-between bg-black/60 backdrop-blur-xl">
+          <div className="p-4 md:p-6 border-b border-white/10 flex items-center justify-between bg-black/60 backdrop-blur-xl">
             <div className="flex items-center gap-2 text-orange-400 font-bold text-[10px] uppercase tracking-[0.3em] metallic-text">
               <Globe className="w-4 h-4" />
               <span>Explorer Core</span>
@@ -2166,7 +2424,7 @@ export default function App() {
             </button>
           </div>
           
-          <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar bg-black/40">
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar bg-black/40">
             {explorerLogs.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-gray-700 opacity-50 text-center p-4">
                 <motion.div
@@ -2198,13 +2456,90 @@ export default function App() {
         {!isExplorerWidgetOpen && (
           <button 
             onClick={() => setIsExplorerWidgetOpen(true)}
-            className="fixed top-1/2 right-0 -translate-y-1/2 bg-black/60 backdrop-blur-xl border border-white/10 border-r-0 p-2 rounded-l-xl text-orange-400 hover:text-orange-300 shadow-xl z-50 transition-all"
+            className="fixed top-1/2 right-0 -translate-y-1/2 bg-black/60 backdrop-blur-xl border border-white/10 border-r-0 p-2 rounded-l-xl text-orange-400 hover:text-orange-300 shadow-xl z-50 transition-all hidden md:block"
             title="Open Explorer Widget"
           >
             <ChevronLeft className="w-5 h-5" />
           </button>
         )}
       </div>
+
+        <AnimatePresence>
+          {pendingCommand && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-xl p-6"
+            >
+              <motion.div 
+                initial={{ scale: 0.9, y: 20 }}
+                animate={{ scale: 1, y: 0 }}
+                exit={{ scale: 0.9, y: 20 }}
+                className="w-full max-w-2xl glass-panel !bg-black/60 border-white/10 rounded-3xl p-8 shadow-2xl relative overflow-hidden"
+              >
+                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-yellow-500 via-orange-500 to-red-500" />
+                
+                <div className="flex items-center gap-4 mb-6">
+                  <div className="p-3 rounded-2xl bg-orange-500/20 border border-orange-500/30">
+                    <ShieldAlert className="w-8 h-8 text-orange-400" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold text-white metallic-text">Security Verification Required</h2>
+                    <p className="text-gray-400 text-sm">The Auditor has flagged this command as potentially risky.</p>
+                  </div>
+                </div>
+
+                <div className="space-y-6">
+                  <div className="p-4 rounded-xl bg-black/40 border border-white/5 font-mono text-sm">
+                    <div className="text-gray-500 mb-2 uppercase text-[10px] font-bold tracking-widest">Proposed Command:</div>
+                    <div className="text-blue-400 break-all">$ {pendingCommand.command}</div>
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-orange-500/5 border border-orange-500/10">
+                    <div className="text-orange-400/70 mb-2 uppercase text-[10px] font-bold tracking-widest">Audit Log:</div>
+                    <div className="text-gray-300 text-sm leading-relaxed">{pendingCommand.audit}</div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <button 
+                      onClick={() => handleSandboxChoice('sandbox')}
+                      className="flex flex-col items-center gap-3 p-6 rounded-2xl bg-blue-500/10 border border-blue-500/30 hover:bg-blue-500/20 transition-all group"
+                    >
+                      <Box className="w-8 h-8 text-blue-400 group-hover:scale-110 transition-transform" />
+                      <div className="text-center">
+                        <div className="text-blue-400 font-bold text-xs uppercase tracking-widest mb-1">Executor Mode</div>
+                        <div className="text-gray-400 text-[10px]">Run in ephemeral Docker container</div>
+                      </div>
+                    </button>
+
+                    <button 
+                      onClick={() => handleSandboxChoice('host')}
+                      className="flex flex-col items-center gap-3 p-6 rounded-2xl bg-orange-500/10 border border-orange-500/30 hover:bg-orange-500/20 transition-all group"
+                    >
+                      <Terminal className="w-8 h-8 text-orange-400 group-hover:scale-110 transition-transform" />
+                      <div className="text-center">
+                        <div className="text-orange-400 font-bold text-xs uppercase tracking-widest mb-1">Host Mode</div>
+                        <div className="text-gray-400 text-[10px]">Execute directly on the host system</div>
+                      </div>
+                    </button>
+
+                    <button 
+                      onClick={() => handleSandboxChoice('cancel')}
+                      className="flex flex-col items-center gap-3 p-6 rounded-2xl bg-white/5 border border-white/10 hover:bg-white/10 transition-all group"
+                    >
+                      <X className="w-8 h-8 text-gray-400 group-hover:scale-110 transition-transform" />
+                      <div className="text-center">
+                        <div className="text-gray-400 font-bold text-xs uppercase tracking-widest mb-1">Cancel</div>
+                        <div className="text-gray-400 text-[10px]">Abort this execution cycle</div>
+                      </div>
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
     </div>
   );
 }

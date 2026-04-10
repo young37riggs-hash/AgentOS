@@ -116,15 +116,6 @@ export const AgentOSSidebar = ({
           <StatusIndicator label="Reviewer" status={reviewerStatus} />
           <StatusIndicator label="Sandbox" status={sandboxStatus} />
         </div>
-        <div className="mt-8 pt-4 border-t border-white/5">
-          <iframe 
-            {...({ allowtransparency: "true" } as any)}
-            scrolling="no" 
-            frameBorder="no" 
-            src="https://w.soundcloud.com/icon/?url=http%3A%2F%2Fsoundcloud.com%2Fyfndlr37-riggs&color=white_transparent&size=16" 
-            style={{ width: "16px", height: "16px" }}
-          />
-        </div>
       </div>
     </>
   );

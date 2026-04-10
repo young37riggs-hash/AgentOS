@@ -1,8 +1,32 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type, FunctionDeclaration, GenerateContentResponse } from "@google/genai";
+import { sandboxManager } from "./sandbox";
 
 // Initialize the Gemini API client
 // The API key is automatically injected by the AI Studio environment
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+const runInSandboxDeclaration: FunctionDeclaration = {
+  name: "run_in_sandbox",
+  description: "Execute a command or code snippet in a secure, isolated Docker-style sandbox to verify findings or test scripts.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      command: {
+        type: Type.STRING,
+        description: "The shell command or code to execute."
+      },
+      image: {
+        type: Type.STRING,
+        description: "The Docker image to use (e.g., 'python:3.9-slim', 'node:18-alpine', 'ubuntu:latest')."
+      },
+      network_disabled: {
+        type: Type.BOOLEAN,
+        description: "Whether to disable network access in the sandbox."
+      }
+    },
+    required: ["command", "image"]
+  }
+};
 
 const PRIMARY_MODEL = "gemini-3.1-pro-preview";
 const FALLBACK_MODEL = "gemini-3-flash-preview";
@@ -243,9 +267,19 @@ export async function runChat(prompt: string, history: string) {
   }
 }
 
-export async function runExplorer(query: string) {
+export async function runExplorer(
+  query: string, 
+  onStatusChange?: (status: "idle" | "working" | "done" | "error") => void,
+  onLog?: (type: "user" | "system" | "planner" | "executor" | "reviewer" | "sandbox" | "terminal", content: string, status?: "success" | "warning" | "error") => void
+) {
   const systemInstruction = `You are an elite autonomous Explorer Sub-Agent. Your goal is to perform complex research tasks, summarize multiple search results, and compare information from different sources.
 You have complete visibility into the application's state and can suggest actions for other agents.
+
+SANDBOX CAPABILITY: You have access to a secure Docker-style sandbox. Use the 'run_in_sandbox' tool to:
+1. Verify code snippets you find during research.
+2. Test shell commands before suggesting them to the Executor.
+3. Perform data analysis in an isolated environment.
+Always report the results of your sandbox executions in your final synthesis.
 
 CRITICAL: After your research synthesis, if you identify a high-value opportunity, a bug to fix, or a necessary next step, you MUST output a <handoff> block.
 The <handoff> block should contain a JSON array of tasks for the Orchestrator.
@@ -261,18 +295,69 @@ Always cross-reference facts and provide a comprehensive, well-structured report
 Use the Google Search tool extensively.
 Communicate clearly and format your output with markdown for readability.`;
 
+  let contents: any[] = [{ role: 'user', parts: [{ text: query }] }];
+  let iterations = 0;
+  const maxIterations = 5;
+
   try {
-    const response = await ai.models.generateContent({
-      model: PRIMARY_MODEL,
-      contents: query,
-      config: {
-        systemInstruction,
-        tools: [{ googleSearch: {} }],
-        temperature: 0.3,
+    while (iterations < maxIterations) {
+      iterations++;
+      const response: GenerateContentResponse = await ai.models.generateContent({
+        model: PRIMARY_MODEL,
+        contents,
+        config: {
+          systemInstruction,
+          tools: [
+            { googleSearch: {} },
+            { functionDeclarations: [runInSandboxDeclaration] }
+          ],
+          toolConfig: { includeServerSideToolInvocations: true },
+          temperature: 0.3,
+        }
+      });
+
+      const candidate = response.candidates?.[0];
+      if (!candidate) break;
+
+      contents.push(candidate.content);
+
+      const functionCalls = response.functionCalls;
+      if (functionCalls && functionCalls.length > 0) {
+        const functionResponses = [];
+        for (const call of functionCalls) {
+          if (call.name === "run_in_sandbox") {
+            onStatusChange?.("working");
+            const { command, image, network_disabled } = call.args as any;
+            
+            onLog?.("system", `Explorer is initializing sandbox: ${image}...`);
+            const result = await sandboxManager.execute(command, {
+              image,
+              networkDisabled: !!network_disabled,
+              volumes: []
+            });
+            
+            result.logs.forEach(log => onLog?.("system", log));
+            
+            functionResponses.push({
+              name: call.name,
+              id: call.id,
+              response: result
+            });
+          }
+        }
+        if (functionResponses.length > 0) {
+          contents.push({ role: 'tool', parts: functionResponses.map(r => ({ functionResponse: r })) });
+          continue;
+        }
       }
-    });
-    return response.text || "";
+
+      onStatusChange?.("done");
+      return response.text || "";
+    }
+    onStatusChange?.("idle");
+    return "Explorer reached maximum iterations without a final response.";
   } catch (error) {
+    onStatusChange?.("error");
     console.warn("Primary explorer model failed, falling back to gemini-3-flash-preview...");
     try {
       const fallbackResponse = await ai.models.generateContent({
