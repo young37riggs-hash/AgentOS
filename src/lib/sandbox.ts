@@ -1,5 +1,5 @@
 /**
- * SandboxManager
+ * SecureContainerExecutor
  * 
  * Client-side manager that communicates with the backend Docker API.
  * Falls back to simulation if the backend is unavailable.
@@ -18,11 +18,11 @@ export interface SandboxResult {
   logs: string[];
 }
 
-export class SandboxManager {
+export class SecureContainerExecutor {
   /**
    * Executes a command in a Docker container via the backend API.
    */
-  async execute(command: string, config: SandboxConfig): Promise<SandboxResult> {
+  async execute(command: string, config: SandboxConfig, cwd?: string): Promise<SandboxResult> {
     const logs: string[] = [];
     
     try {
@@ -31,7 +31,7 @@ export class SandboxManager {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ command, config }),
+        body: JSON.stringify({ command, config, cwd }),
       });
 
       if (!response.ok) {
@@ -90,4 +90,4 @@ export class SandboxManager {
   }
 }
 
-export const sandboxManager = new SandboxManager();
+export const secureContainerExecutor = new SecureContainerExecutor();

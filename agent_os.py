@@ -84,48 +84,108 @@ REVIEWER_PROMPT = """
 </system_ontology>
 """
 
+try:
+    import chromadb
+    from chromadb.utils import embedding_functions
+except ImportError:
+    chromadb = None
+    print("[!] ChromaDB not found. Install with: pip install chromadb")
+
 class LocalMemoryCore:
     def __init__(self):
-        self.memory_store = {
-            "saved_paths": {
-                "python scripts": "/Users/admin/projects/python_scripts",
-                "downloads": "/Users/admin/Downloads",
-            },
-            "preferences": [
-                "Always use absolute paths when moving files.",
-                "Never delete files without user confirmation."
-            ]
-        }
+        self.collection_name = "agentos_memory"
+        if chromadb and genai:
+            self.client = chromadb.PersistentClient(path="./chroma_db")
+            
+            # Use a custom embedding function with google-genai
+            class GeminiEmbeddingFunction(embedding_functions.EmbeddingFunction):
+                def __call__(self, input: list[str]) -> list[list[float]]:
+                    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+                    embeddings = []
+                    for text in input:
+                        response = client.models.embed_content(
+                            model='gemini-embedding-2-preview',
+                            contents=text,
+                        )
+                        embeddings.append(response.embeddings[0].values)
+                    return embeddings
+
+            self.collection = self.client.get_or_create_collection(
+                name=self.collection_name,
+                embedding_function=GeminiEmbeddingFunction()
+            )
+            
+            # Seed initial data if empty
+            if self.collection.count() == 0:
+                self._seed_initial_data()
+        else:
+            self.client = None
+            self.collection = None
+            print("[!] Vector DB disabled due to missing dependencies.")
+
+    def _seed_initial_data(self):
+        initial_memories = [
+            {"id": "path_1", "type": "path", "key": "python scripts", "content": "/Users/admin/projects/python_scripts"},
+            {"id": "path_2", "type": "path", "key": "downloads", "content": "/Users/admin/Downloads"},
+            {"id": "pref_1", "type": "preference", "content": "Always use absolute paths when moving files."},
+            {"id": "pref_2", "type": "preference", "content": "Never delete files without user confirmation."}
+        ]
+        
+        documents = []
+        metadatas = []
+        ids = []
+        
+        for mem in initial_memories:
+            if mem["type"] == "path":
+                text = f"Path to {mem['key']}: {mem['content']}"
+            else:
+                text = f"Preference: {mem['content']}"
+            
+            documents.append(text)
+            metadatas.append({"type": mem["type"], "key": mem.get("key", ""), "content": mem["content"]})
+            ids.append(mem["id"])
+            
+        self.collection.add(documents=documents, metadatas=metadatas, ids=ids)
+
+    def store_memory(self, content: str, mem_type: str, key: str = ""):
+        if not self.collection:
+            return
+            
+        mem_id = f"mem_{int(time.time() * 1000)}"
+        text = f"Path to {key}: {content}" if mem_type == "path" else f"Preference: {content}"
+        
+        self.collection.add(
+            documents=[text],
+            metadatas=[{"type": mem_type, "key": key, "content": content}],
+            ids=[mem_id]
+        )
+        print(f"[*] Stored new memory in Vector DB: {text}")
 
     def retrieve_context(self, user_query):
-        results = []
-        lower_query = user_query.lower()
-        query_words = set([w for w in lower_query.split() if len(w) > 2])
-
-        for key, path in self.memory_store["saved_paths"].items():
-            score = 0.0
-            lower_key = key.lower()
-            if lower_key in lower_query:
-                score = 0.95
-            else:
-                key_words = set(lower_key.split())
-                overlap = len([kw for kw in key_words if any(qw in kw or kw in qw for qw in query_words)])
-                if overlap > 0:
-                    score = 0.4 + (overlap / len(key_words)) * 0.4
-            if score > 0.3:
-                results.append({"type": "path", "key": key, "content": path, "confidence": score})
-
-        for pref in self.memory_store["preferences"]:
-            score = 0.0
-            pref_words = set([w for w in pref.lower().split() if len(w) > 3])
-            overlap = len([pw for pw in pref_words if any(qw in pw or pw in qw for qw in query_words)])
-            if overlap > 0:
-                score = 0.3 + (overlap / len(pref_words)) * 0.5
-            if score > 0.35:
-                results.append({"type": "preference", "content": pref, "confidence": score})
-
-        results.sort(key=lambda x: x["confidence"], reverse=True)
-        return results[:4]
+        if not self.collection:
+            return []
+            
+        results = self.collection.query(
+            query_texts=[user_query],
+            n_results=4
+        )
+        
+        formatted_results = []
+        if results and results['metadatas'] and len(results['metadatas'][0]) > 0:
+            for i in range(len(results['metadatas'][0])):
+                meta = results['metadatas'][0][i]
+                # ChromaDB returns distances, we convert to a pseudo-confidence score
+                distance = results['distances'][0][i] if 'distances' in results and results['distances'] else 0
+                confidence = max(0.0, 1.0 - distance) # Simple normalization, might need tweaking based on distance metric
+                
+                formatted_results.append({
+                    "type": meta["type"],
+                    "key": meta.get("key", ""),
+                    "content": meta["content"],
+                    "confidence": confidence
+                })
+                
+        return formatted_results
 
 class SecureTerminal:
     def __init__(self):
@@ -155,7 +215,7 @@ class SecureTerminal:
         except Exception as e:
             return f"[STDERR]: Critical Execution Error: {e}"
 
-class DockerSandbox:
+class SecureContainerExecutor:
     def __init__(self):
         if docker is None:
             self.client = None
@@ -172,6 +232,14 @@ class DockerSandbox:
             
         print(f"[*] Provisioning ephemeral container ({image}, Network Disabled: {network_disabled}, Volumes: {volumes or {}})...")
         try:
+            # Extract working_dir if it was provided in the volumes_dict binding, otherwise default to None
+            working_dir = None
+            if volumes:
+                for host_path, bind_info in volumes.items():
+                    if bind_info.get('bind') == '/workspace':
+                        working_dir = '/workspace'
+                        break
+
             container_output = self.client.containers.run(
                 image,
                 command=f'sh -c "{command}"',
@@ -180,6 +248,7 @@ class DockerSandbox:
                 stderr=True,
                 network_disabled=network_disabled, 
                 volumes=volumes or {},
+                working_dir=working_dir,
                 mem_limit="128m"
             )
             return {"success": True, "output": container_output.decode('utf-8').strip()}
@@ -198,7 +267,7 @@ class AgentOS:
             self.client = None
         self.terminal = SecureTerminal()
         self.memory = LocalMemoryCore()
-        self.sandbox = DockerSandbox()
+        self.sandbox = SecureContainerExecutor()
 
     def _call_llm(self, system_prompt, user_content):
         if not self.client:
@@ -281,9 +350,11 @@ class AgentOS:
                 if vol_match:
                     volumes_str = vol_match.group(1).strip()
                     if volumes_str.lower() != 'none':
-                        # In a real scenario, we would parse the volume string into a dict
-                        # e.g., {'/host/path': {'bind': '/container/path', 'mode': 'ro'}}
+                        # Still support custom volumes if specified
                         pass
+                
+                # Automatically mount the current working directory as /workspace
+                volumes_dict[self.terminal.current_dir] = {'bind': '/workspace', 'mode': 'rw'}
 
             if "[REJECTED]" in verdict:
                 print(f"[!] SECURITY ALERT: Command rejected by internal auditor.")
@@ -291,8 +362,11 @@ class AgentOS:
                 
             # 5. SANDBOX TESTING PHASE
             if "[APPROVED]" in verdict or "[REQUIRES_USER_CONSENT]" in verdict:
-                print(f"    [System]: Provisioning Docker Sandbox (Image: {image}, Network Disabled: {network_disabled}, Volumes: {volumes_str})...")
-                sandbox_result = self.sandbox.test_command(proposed_command, image=image, network_disabled=network_disabled, volumes=volumes_dict)
+                # Prefix the command with a change to the mounted workspace directory
+                sandboxed_cmd = f"cd /workspace && {proposed_command}"
+                
+                print(f"    [System]: Provisioning Docker Sandbox (Image: {image}, Network Disabled: {network_disabled}, Volumes: {volumes_dict})...")
+                sandbox_result = self.sandbox.test_command(sandboxed_cmd, image=image, network_disabled=network_disabled, volumes=volumes_dict)
                 
                 if not sandbox_result["success"]:
                     print(f"[!] SANDBOX FAILED:\\n{sandbox_result['output']}")

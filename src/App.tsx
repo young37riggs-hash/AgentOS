@@ -47,8 +47,8 @@ import {
   ShieldAlert,
   X,
 } from "lucide-react";
-import { runPlanner, runExecutor, runReviewer, runChat, generateMediaImage, generateMediaVideo, runExplorer, runOrchestrator } from "./lib/gemini";
-import { sandboxManager } from "./lib/sandbox";
+import { runPlanner, runExecutor, runReviewer, runChat, generateMediaImage, generateMediaVideo, runExplorer, runOrchestrator, ForbiddenRule } from "./lib/gemini";
+import { secureContainerExecutor } from "./lib/sandbox";
 import { memoryCore, MemoryResult } from "./lib/memory";
 import { LiveVideoChat } from "./lib/live";
 import { motion, AnimatePresence } from "motion/react";
@@ -72,6 +72,8 @@ interface Task {
   text: string;
   status: 'todo' | 'in-progress' | 'done';
   priority: 'low' | 'medium' | 'high';
+  urgency?: number; // 1-5, where 5 is highest
+  complexity?: number; // 1-5, where 5 is highest
   assignedAgent?: AppMode;
   dependencies: string[];
   dueDate: string | null;
@@ -92,6 +94,19 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [currentDir, setCurrentDir] = useState("/home/user/projects");
   const [activeMemories, setActiveMemories] = useState<MemoryResult[]>([]);
+  const [recoveryContext, setRecoveryContext] = useState<{ originalCommand: string, error: string } | null>(null);
+
+  const [forbiddenRules, setForbiddenRules] = useState<ForbiddenRule[]>(() => {
+    const saved = localStorage.getItem('agentos_forbidden_rules');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [newRulePattern, setNewRulePattern] = useState("");
+  const [newRuleAction, setNewRuleAction] = useState<'REJECTED' | 'REQUIRES_USER_CONSENT'>('REQUIRES_USER_CONSENT');
+
+  useEffect(() => {
+    localStorage.setItem('agentos_forbidden_rules', JSON.stringify(forbiddenRules));
+  }, [forbiddenRules]);
 
   // Additional Mode States
   const [envVars, setEnvVars] = useState<Record<string, string>>(() => {
@@ -114,6 +129,76 @@ export default function App() {
   const [liveTranscripts, setLiveTranscripts] = useState<{text: string, role: 'user' | 'model'}[]>([]);
   const [liveLogs, setLiveLogs] = useState<{message: string, type: 'info' | 'success' | 'error'}[]>([]);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
+
+  // File Monitoring
+  const [monitoredPaths, setMonitoredPaths] = useState<string[]>(() => {
+    const saved = localStorage.getItem("agentos_monitored_paths");
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  useEffect(() => {
+    localStorage.setItem("agentos_monitored_paths", JSON.stringify(monitoredPaths));
+  }, [monitoredPaths]);
+
+  useEffect(() => {
+    // Re-register all paths on load
+    monitoredPaths.forEach(path => {
+      fetch('/api/monitor/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetPath: path })
+      });
+    });
+
+    const eventSource = new EventSource('/api/events');
+    
+    eventSource.addEventListener('file_change', (e) => {
+      const data = JSON.parse(e.data);
+      addLog("system", `File change detected in ${data.targetPath}: ${data.filename} (${data.eventType})`, "success");
+      
+      // Auto-trigger Orchestrator or Explorer to analyze the change
+      const query = `Analyze the recent file change in monitored path ${data.targetPath}. File affected: ${data.filename}. Event type: ${data.eventType}. Propose actions if necessary.`;
+      
+      // Queue an action for Orchestrator to decide
+      setTimeout(() => {
+        handleOrchestratorSubmit(query);
+      }, 500);
+    });
+
+    return () => {
+      eventSource.close();
+    };
+  }, []);
+
+  const addMonitoredPath = async (path: string) => {
+    if (!path.trim() || monitoredPaths.includes(path)) return;
+    
+    try {
+      await fetch('/api/monitor/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetPath: path })
+      });
+      setMonitoredPaths(prev => [...prev, path]);
+      addLog("system", `Started monitoring path: ${path}`, "success");
+    } catch (e) {
+      addLog("system", `Failed to monitor path: ${path}`, "error");
+    }
+  };
+
+  const removeMonitoredPath = async (path: string) => {
+    try {
+      await fetch('/api/monitor/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetPath: path })
+      });
+      setMonitoredPaths(prev => prev.filter(p => p !== path));
+      addLog("system", `Stopped monitoring path: ${path}`, "success");
+    } catch (e) {
+      addLog("system", `Failed to stop monitoring path: ${path}`, "error");
+    }
+  };
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -436,12 +521,14 @@ export default function App() {
               text: action.text, 
               status: action.status || 'todo', 
               priority: action.priority || 'medium',
+              urgency: action.urgency || Math.floor(Math.random() * 3) + 1,
+              complexity: action.complexity || Math.floor(Math.random() * 3) + 1,
               assignedAgent: action.agent as AppMode,
               dependencies: action.dependencies || [],
               dueDate: action.dueDate || null
             };
             updatedTasks.push(newTask);
-            subtasksAdded.push(`Added: ${action.text} (Agent: ${action.agent || 'none'})`);
+            subtasksAdded.push(`Added: ${action.text} (Agent: ${action.agent || 'none'}, Urgency: ${newTask.urgency})`);
           } else if (action.action === 'remove' && action.id) {
             updatedTasks = updatedTasks.filter(t => t.id !== action.id);
             subtasksAdded.push(`Removed task: ${action.id}`);
@@ -452,6 +539,8 @@ export default function App() {
               assignedAgent: (action.agent as AppMode) || t.assignedAgent,
               status: action.status || t.status,
               priority: action.priority || t.priority,
+              urgency: action.urgency !== undefined ? action.urgency : t.urgency,
+              complexity: action.complexity !== undefined ? action.complexity : t.complexity,
               dependencies: action.dependencies || t.dependencies,
               dueDate: action.dueDate !== undefined ? action.dueDate : t.dueDate
             } : t);
@@ -468,6 +557,16 @@ export default function App() {
       });
       
       setOrchestratorLogs(prev => [...prev, { task: taskText, subtasks: subtasksAdded }]);
+
+      // Process dynamically queued tasks by urgency then complexity
+      tasksToRun.sort((a, b) => {
+        const uA = a.urgency || 1;
+        const uB = b.urgency || 1;
+        if (uA !== uB) return uB - uA; // Highest urgency first
+        const cA = a.complexity || 1;
+        const cB = b.complexity || 1;
+        return cA - cB; // Lowest complexity next (quick wins)
+      });
 
       // Run queued tasks
       for (const task of tasksToRun) {
@@ -642,7 +741,10 @@ export default function App() {
     if (!requestText.trim() || isRunning) return;
 
     const userRequest = requestText.trim();
-    if (!overrideInput) setInput("");
+    if (!overrideInput) {
+      setInput("");
+      setRecoveryContext(null);
+    }
     setIsRunning(true);
 
     // Reset states
@@ -773,7 +875,7 @@ export default function App() {
       setReviewerStatus("working");
       addLog("system", "Auditor is reviewing the proposed command...");
 
-      const reviewerResponse = await runReviewer(command);
+      const reviewerResponse = await runReviewer(command, forbiddenRules);
 
       const audit = parseXML(reviewerResponse, "audit_log");
       const verdictRaw = parseXML(reviewerResponse, "verdict");
@@ -831,7 +933,7 @@ export default function App() {
         // APPROVED - Run in sandbox first, then host
         await executeInSandbox(command, image, networkDisabled, volumes === "none" ? [] : volumes.split(","));
         addLog("reviewer", "Command Approved and Sandboxed. Executing on host...", "success");
-        simulateExecution(command);
+        executeOnHost(command);
       }
     } catch (error: any) {
       addLog("system", `Critical Error: ${error.message}`, "error");
@@ -852,11 +954,11 @@ export default function App() {
     addLog("system", `Provisioning ephemeral Docker container (${image})...`);
     
     try {
-      const result = await sandboxManager.execute(command, {
+      const result = await secureContainerExecutor.execute(command, {
         image,
         networkDisabled,
         volumes
-      });
+      }, currentDir);
 
       setSandboxData({
         containerId: `cnt_${Math.random().toString(36).substring(2, 8)}`,
@@ -884,7 +986,7 @@ export default function App() {
     }
   };
 
-  const handleSandboxChoice = async (choice: 'sandbox' | 'host' | 'cancel') => {
+  const handleSandboxChoice = async (choice: 'sandbox' | 'host' | 'wsl2' | 'cancel') => {
     if (!pendingCommand) return;
     const { command, image, networkDisabled, volumes } = pendingCommand;
     setPendingCommand(null);
@@ -895,32 +997,123 @@ export default function App() {
       setIsRunning(false);
     } else if (choice === 'host') {
       addLog("system", "User chose to execute on Host.");
-      simulateExecution(command);
+      executeOnHost(command);
+    } else if (choice === 'wsl2') {
+      addLog("system", "User chose to execute in WSL2.");
+      executeInWSL(command);
     } else {
       addLog("system", "Execution cancelled by user.", "warning");
       setIsRunning(false);
     }
   };
-  const simulateExecution = (command: string) => {
+
+  const executeInWSL = async (command: string) => {
+    const envString = Object.entries(envVars).map(([k, v]) => `${k}=${v}`).join(' ');
+    addLog("terminal", `[WSL2] $ ${envString} ${command}`);
+    
+    if (command.startsWith("cd ")) {
+      // WSL cd logic would need to be handled differently, but for now we just pass it
+      addLog("system", "Directory changes in WSL2 are ephemeral per command unless chained.", "warning");
+    }
+
+    try {
+      const response = await fetch("/api/wsl/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: `${envString} ${command}`, cwd: currentDir }),
+      });
+      const result = await response.json();
+      
+      if (result.exitCode === 0) {
+        addLog("terminal", `[Output]\n${result.stdout || "Execution successful."}`);
+        
+        if (recoveryContext) {
+          addLog("system", "Error recovery successful. Updating memory...", "success");
+          await memoryCore.storeMemory(`Command failed: ${recoveryContext.originalCommand}. Error: ${recoveryContext.error}. Successful recovery command: ${command}`, "preference");
+          setRecoveryContext(null);
+        }
+
+        addLog("system", "Step completed.", "success");
+        addLog("system", "Operational cycle complete. Awaiting next command.");
+        setIsRunning(false);
+      } else {
+        addLog("terminal", `[STDERR]\n${result.stderr || result.stdout}`, "error");
+        
+        // ERROR RECOVERY LOOP
+        addLog("system", "Execution failed. Initiating error recovery loop...", "warning");
+        
+        const errorMsg = result.stderr || result.stdout;
+        setRecoveryContext({ originalCommand: command, error: errorMsg });
+        
+        const recoveryPrompt = `[RECOVERY_REQUEST]\nThe previous command failed in WSL2.\nCommand: ${command}\nError:\n${errorMsg}\n\nPlease re-evaluate the previous step and provide a corrected or alternative command.`;
+        
+        // Call handleRunCycle again with the recovery prompt
+        setTimeout(() => {
+          handleRunCycle(recoveryPrompt);
+        }, 1000);
+      }
+    } catch (error: any) {
+      addLog("terminal", `[STDERR]\n${error.message}`, "error");
+      setIsRunning(false);
+    }
+  };
+
+  const executeOnHost = async (command: string) => {
     const envString = Object.entries(envVars).map(([k, v]) => `${k}=${v}`).join(' ');
     addLog("terminal", `$ ${envString} ${command}`);
-    setTimeout(() => {
-      if (command.startsWith("cd ")) {
-        const newDir = command.replace("cd ", "").trim();
-        setCurrentDir((prev) =>
-          prev.endsWith("/") ? prev + newDir : prev + "/" + newDir,
-        );
-        addLog("terminal", `[Success: Directory changed]`);
-      } else {
-        addLog(
-          "terminal",
-          `[Simulated Output for: ${envString} ${command}]\nExecution successful.`,
-        );
-      }
+    
+    if (command.startsWith("cd ")) {
+      const newDir = command.replace("cd ", "").trim();
+      setCurrentDir((prev) =>
+        prev.endsWith("/") ? prev + newDir : prev + "/" + newDir,
+      );
+      addLog("terminal", `[Success: Directory changed]`);
       addLog("system", "Step completed.", "success");
       addLog("system", "Operational cycle complete. Awaiting next command.");
       setIsRunning(false);
-    }, 1000);
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/host/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: `${envString} ${command}`, cwd: currentDir }),
+      });
+      const result = await response.json();
+      
+      if (result.exitCode === 0) {
+        addLog("terminal", `[Output]\n${result.stdout || "Execution successful."}`);
+        
+        if (recoveryContext) {
+          addLog("system", "Error recovery successful. Updating memory...", "success");
+          await memoryCore.storeMemory(`Command failed: ${recoveryContext.originalCommand}. Error: ${recoveryContext.error}. Successful recovery command: ${command}`, "preference");
+          setRecoveryContext(null);
+        }
+
+        addLog("system", "Step completed.", "success");
+        addLog("system", "Operational cycle complete. Awaiting next command.");
+        setIsRunning(false);
+      } else {
+        addLog("terminal", `[STDERR]\n${result.stderr || result.stdout}`, "error");
+        
+        // ERROR RECOVERY LOOP
+        addLog("system", "Execution failed. Initiating error recovery loop...", "warning");
+        
+        const errorMsg = result.stderr || result.stdout;
+        setRecoveryContext({ originalCommand: command, error: errorMsg });
+        
+        const recoveryPrompt = `[RECOVERY_REQUEST]\nThe previous command failed.\nCommand: ${command}\nError:\n${errorMsg}\n\nPlease re-evaluate the previous step and provide a corrected or alternative command.`;
+        
+        // Call handleRunCycle again with the recovery prompt
+        setTimeout(() => {
+          handleRunCycle(recoveryPrompt);
+        }, 1000);
+      }
+    } catch (error: any) {
+      addLog("terminal", `[STDERR]\n${error.message}`, "error");
+      setIsRunning(false);
+    }
   };
 
   return (
@@ -2501,15 +2694,26 @@ export default function App() {
                     <div className="text-gray-300 text-sm leading-relaxed">{pendingCommand.audit}</div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <button 
                       onClick={() => handleSandboxChoice('sandbox')}
                       className="flex flex-col items-center gap-3 p-6 rounded-2xl bg-blue-500/10 border border-blue-500/30 hover:bg-blue-500/20 transition-all group"
                     >
                       <Box className="w-8 h-8 text-blue-400 group-hover:scale-110 transition-transform" />
                       <div className="text-center">
-                        <div className="text-blue-400 font-bold text-xs uppercase tracking-widest mb-1">Executor Mode</div>
+                        <div className="text-blue-400 font-bold text-xs uppercase tracking-widest mb-1">Sandbox</div>
                         <div className="text-gray-400 text-[10px]">Run in ephemeral Docker container</div>
+                      </div>
+                    </button>
+
+                    <button 
+                      onClick={() => handleSandboxChoice('wsl2')}
+                      className="flex flex-col items-center gap-3 p-6 rounded-2xl bg-purple-500/10 border border-purple-500/30 hover:bg-purple-500/20 transition-all group"
+                    >
+                      <Terminal className="w-8 h-8 text-purple-400 group-hover:scale-110 transition-transform" />
+                      <div className="text-center">
+                        <div className="text-purple-400 font-bold text-xs uppercase tracking-widest mb-1">WSL2 Mode</div>
+                        <div className="text-gray-400 text-[10px]">Execute in Windows Subsystem for Linux</div>
                       </div>
                     </button>
 
@@ -2535,6 +2739,101 @@ export default function App() {
                       </div>
                     </button>
                   </div>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {isSettingsOpen && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-xl p-6"
+            >
+              <motion.div 
+                initial={{ scale: 0.9, y: 20 }}
+                animate={{ scale: 1, y: 0 }}
+                exit={{ scale: 0.9, y: 20 }}
+                className="w-full max-w-2xl glass-panel !bg-black/60 border-white/10 rounded-3xl p-8 shadow-2xl relative overflow-hidden flex flex-col max-h-[80vh]"
+              >
+                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-gray-500 via-white to-gray-500" />
+                
+                <div className="flex items-center justify-between mb-6">
+                  <div className="flex items-center gap-4">
+                    <div className="p-3 rounded-2xl bg-white/10 border border-white/20">
+                      <Settings className="w-8 h-8 text-white" />
+                    </div>
+                    <div>
+                      <h2 className="text-2xl font-bold text-white metallic-text">Security Settings</h2>
+                      <p className="text-gray-400 text-sm">Manage forbidden commands and patterns.</p>
+                    </div>
+                  </div>
+                  <button onClick={() => setIsSettingsOpen(false)} className="p-2 hover:bg-white/10 rounded-xl transition-colors">
+                    <X className="w-6 h-6 text-gray-400" />
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 mb-6 space-y-4">
+                  {forbiddenRules.length === 0 ? (
+                    <div className="text-center text-gray-500 italic py-8">No forbidden rules defined.</div>
+                  ) : (
+                    forbiddenRules.map((rule, idx) => (
+                      <div key={idx} className="flex items-center justify-between p-4 rounded-xl bg-white/5 border border-white/10">
+                        <div className="flex items-center gap-4">
+                          <code className="text-red-400 bg-red-500/10 px-2 py-1 rounded border border-red-500/20">{rule.pattern}</code>
+                          <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded border ${
+                            rule.action === 'REJECTED' ? 'bg-red-500/10 border-red-500/30 text-red-400' : 'bg-orange-500/10 border-orange-500/30 text-orange-400'
+                          }`}>
+                            {rule.action}
+                          </span>
+                        </div>
+                        <button 
+                          onClick={() => setForbiddenRules(forbiddenRules.filter((_, i) => i !== idx))}
+                          className="p-2 hover:bg-red-500/20 text-gray-500 hover:text-red-400 rounded-lg transition-colors"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="pt-6 border-t border-white/10 flex gap-4 items-end">
+                  <div className="flex-1">
+                    <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">Pattern (Regex or String)</label>
+                    <input 
+                      type="text" 
+                      value={newRulePattern}
+                      onChange={(e) => setNewRulePattern(e.target.value)}
+                      placeholder="e.g., rm -rf, mkfs, ^sudo"
+                      className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-white/30"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">Action</label>
+                    <select 
+                      value={newRuleAction}
+                      onChange={(e) => setNewRuleAction(e.target.value as any)}
+                      className="bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-white/30 appearance-none"
+                    >
+                      <option value="REQUIRES_USER_CONSENT">Require Consent</option>
+                      <option value="REJECTED">Reject Automatically</option>
+                    </select>
+                  </div>
+                  <button 
+                    onClick={() => {
+                      if (newRulePattern.trim()) {
+                        setForbiddenRules([...forbiddenRules, { pattern: newRulePattern.trim(), action: newRuleAction }]);
+                        setNewRulePattern("");
+                      }
+                    }}
+                    className="bg-white/10 hover:bg-white/20 border border-white/20 text-white px-6 py-3 rounded-xl font-bold transition-colors"
+                  >
+                    Add Rule
+                  </button>
                 </div>
               </motion.div>
             </motion.div>

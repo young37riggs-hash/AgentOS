@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type, FunctionDeclaration, GenerateContentResponse } from "@google/genai";
-import { sandboxManager } from "./sandbox";
+import { secureContainerExecutor } from "./sandbox";
 
 // Initialize the Gemini API client
 // The API key is automatically injected by the AI Studio environment
@@ -28,6 +28,21 @@ const runInSandboxDeclaration: FunctionDeclaration = {
   }
 };
 
+const monitorPathDeclaration: FunctionDeclaration = {
+  name: "monitor_path",
+  description: "Start actively monitoring a specific file or directory path for changes. The Orchestrator will be notified when changes occur.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      path: {
+        type: Type.STRING,
+        description: "The absolute or relative file/directory path to monitor."
+      }
+    },
+    required: ["path"]
+  }
+};
+
 const PRIMARY_MODEL = "gemini-3.1-pro-preview";
 const FALLBACK_MODEL = "gemini-3-flash-preview";
 
@@ -49,7 +64,7 @@ const PLANNER_PROMPT = `
 <system_ontology>
   <core_identity>
     <role>AgentOS Strategic Planner</role>
-    <objective>Deconstruct user requests into safe, logical, step-by-step operational blueprints for a Linux/Unix/Windows terminal environment.</objective>
+    <objective>Deconstruct user requests into safe, logical, step-by-step operational blueprints for a Linux/Unix/Windows/WSL2 terminal environment.</objective>
   </core_identity>
 
   <axiomatic_laws>
@@ -57,6 +72,7 @@ const PLANNER_PROMPT = `
     <law id="2">Non-Destruction: Always default to non-destructive analysis first. (e.g., Use \`find\` or \`ls\` before suggesting \`rm\` or \`mv\`).</law>
     <law id="3">Modularity: Break down tasks into distinct, atomic steps that can be verified individually.</law>
     <law id="4">Delegation: If a step requires complex web research, summarizing multiple search results, or comparing sources, delegate to the Explorer agent by outputting <call_explorer>your detailed research query</call_explorer> instead of a standard step.</law>
+    <law id="5">Environment Awareness: The user has access to Host execution, Docker container execution (e.g., ubuntu:latest), and WSL2 execution. Plan commands accordingly if the user requests a specific environment.</law>
   </axiomatic_laws>
 
   <output_format>
@@ -109,7 +125,7 @@ const REVIEWER_PROMPT = `
     You will receive a proposed command. You must output your verdict strictly as follows:
     <audit_log>Analyze the proposed command against the security lattice.</audit_log>
     <sandbox_config>
-      <image>Determine best base image (e.g., alpine:latest, python:3.9-slim, node:18-alpine, ubuntu:latest)</image>
+      <image>Determine best base image (e.g., ubuntu:latest, alpine:latest, python:3.9-slim, node:18-alpine)</image>
       <network_disabled>true or false (only enable if command requires internet, e.g., curl, wget, pip install)</network_disabled>
       <volumes>Specify any required volume mounts or 'none'</volumes>
     </sandbox_config>
@@ -176,8 +192,21 @@ ${step}
   }
 }
 
-export async function runReviewer(proposedCommand: string) {
+export interface ForbiddenRule {
+  pattern: string;
+  action: 'REJECTED' | 'REQUIRES_USER_CONSENT';
+}
+
+export async function runReviewer(proposedCommand: string, forbiddenRules: ForbiddenRule[] = []) {
+  const rulesXml = forbiddenRules.length > 0 ? `
+<user_defined_rules>
+  ${forbiddenRules.map(r => `<rule pattern="${r.pattern}" action="${r.action}" />`).join('\n  ')}
+  If the proposed command matches any of these patterns, you MUST output the specified action in your verdict.
+</user_defined_rules>
+` : '';
+
   const prompt = `
+${rulesXml}
 <proposed_command>
 ${proposedCommand}
 </proposed_command>
@@ -309,7 +338,7 @@ Communicate clearly and format your output with markdown for readability.`;
           systemInstruction,
           tools: [
             { googleSearch: {} },
-            { functionDeclarations: [runInSandboxDeclaration] }
+            { functionDeclarations: [runInSandboxDeclaration, monitorPathDeclaration] }
           ],
           toolConfig: { includeServerSideToolInvocations: true },
           temperature: 0.3,
@@ -330,7 +359,7 @@ Communicate clearly and format your output with markdown for readability.`;
             const { command, image, network_disabled } = call.args as any;
             
             onLog?.("system", `Explorer is initializing sandbox: ${image}...`);
-            const result = await sandboxManager.execute(command, {
+            const result = await secureContainerExecutor.execute(command, {
               image,
               networkDisabled: !!network_disabled,
               volumes: []
@@ -343,6 +372,32 @@ Communicate clearly and format your output with markdown for readability.`;
               id: call.id,
               response: result
             });
+          } else if (call.name === "monitor_path") {
+            const { path } = call.args as any;
+            onLog?.("system", `Explorer requested monitoring for path: ${path}`);
+            
+            // Return success immediately. App.tsx should ideally handle the state update,
+            // but for now we simulate it successfully registering.
+            // A realistic implementation would use a callback to actually add the monitored path in App.tsx
+            
+            try {
+              await fetch('/api/monitor/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ targetPath: path })
+              });
+              functionResponses.push({
+                name: call.name,
+                id: call.id,
+                response: { status: "Monitoring started", path }
+              });
+            } catch (error) {
+              functionResponses.push({
+                name: call.name,
+                id: call.id,
+                response: { status: "Failed to start monitoring", path, error: String(error) }
+              });
+            }
           }
         }
         if (functionResponses.length > 0) {
@@ -392,6 +447,8 @@ export interface OrchestratorAction {
   agent?: string;
   status?: "todo" | "in-progress" | "done";
   priority?: "low" | "medium" | "high";
+  urgency?: number;
+  complexity?: number;
   dependencies?: string[];
   dueDate?: string;
 }
@@ -401,21 +458,22 @@ export async function runOrchestrator(task: string, currentTasks: {id: string, t
     const response = await generateContentWithFallback({
       contents: `Recent Explorer Research Context:\n${explorerContext}\n\nCurrent Tasks:\n${JSON.stringify(currentTasks, null, 2)}\n\nUser Request: ${task}`,
       config: {
-        systemInstruction: `You are a Task Orchestrator. Your job is to manage the user's task list, assign tasks to specialized agents, and execute them.
+        systemInstruction: `You are a Task Orchestrator. Your job is to manage the user's task list, prioritize tasks, assign tasks to specialized agents, and execute them.
 Available Agents:
 - agentos: Core system agent for terminal commands, docker execution, and file manipulation.
 - chat: Conversational agent for general questions and text generation.
 - explorer: Autonomous research agent with web search capabilities.
 - media: Generates images and videos.
 
-You can add new tasks, assign them to agents, remove tasks, update tasks (including status, priority, dependencies, due date), or run them.
-When a user asks to accomplish a goal, you should break it down into tasks, assign them to the appropriate agents, set priorities, and optionally run the first task.
-If the user asks to create more tasks based on a pattern, analyze the current tasks and add new ones that follow the pattern.
+You can add new tasks, assign them to agents, remove tasks, update tasks (including status, priority, urgency, complexity, dependencies, due date), or run them.
+When a user asks to accomplish a goal, you should break it down into tasks, assign them to the appropriate agents, set priorities, estimate urgency (1-5) and complexity (1-5) based on the task description, and optionally run the most urgent first task.
+If the tasks require prioritization, assign a higher urgency (5 is highest) to critical path items and a complexity score to help the UI sort them.
+
 Output ONLY a JSON array of action objects. Do not include markdown formatting like \`\`\`json.
 Action object format:
-{ "action": "add", "text": "Task description", "agent": "agentos", "priority": "high", "status": "todo", "dependencies": ["task-id-1"], "dueDate": "2026-04-10" }
+{ "action": "add", "text": "Task description", "agent": "agentos", "priority": "high", "urgency": 5, "complexity": 3, "status": "todo", "dependencies": ["task-id-1"], "dueDate": "2026-04-10" }
 { "action": "remove", "id": "task-id" }
-{ "action": "update", "id": "task-id", "text": "New description", "agent": "explorer", "status": "in-progress", "priority": "medium" }
+{ "action": "update", "id": "task-id", "text": "New description", "agent": "explorer", "status": "in-progress", "priority": "medium", "urgency": 2, "complexity": 1 }
 { "action": "run", "id": "task-id" }`,
         temperature: 0.2,
       }
