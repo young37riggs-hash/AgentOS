@@ -10,7 +10,11 @@ export interface RetryOptions {
  * Essential for robust AgentOS interaction with third-party tools.
  */
 export class RetryPolicy {
-  constructor(private readonly options: RetryOptions) {}
+  private readonly options: RetryOptions;
+
+  constructor(options: RetryOptions) {
+    this.options = options;
+  }
 
   public async execute<T>(action: () => Promise<T>): Promise<T> {
     let attempt = 0;

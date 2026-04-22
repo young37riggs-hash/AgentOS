@@ -1,4 +1,5 @@
 import express from "express";
+import http from "http";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -6,12 +7,12 @@ import Docker from 'dockerode';
 import { exec } from 'child_process';
 import util from 'util';
 import fs from 'fs';
-import { initVectorDB, storeMemory, retrieveContext } from './server/memory';
-import { GatewayControlPlane } from './server/core/GatewayControlPlane';
-import { IntegrationRegistry } from './server/tools/IntegrationRegistry';
-import { ChannelManager } from './server/channels/ChannelManager';
-import { AgentRuntime } from './server/agents/AgentRuntime';
-import { loadN8nFrameworkPolyfills } from './server/tools/n8n/SkeletonLoader';
+import { initVectorDB, storeMemory, retrieveContext } from './server/memory.ts';
+import { GatewayControlPlane } from './server/core/GatewayControlPlane.ts';
+import { IntegrationRegistry } from './server/tools/IntegrationRegistry.ts';
+import { ChannelManager } from './server/channels/ChannelManager.ts';
+import { AgentRuntime } from './server/agents/AgentRuntime.ts';
+import { loadN8nFrameworkPolyfills } from './server/tools/n8n/SkeletonLoader.ts';
 
 const execPromise = util.promisify(exec);
 
@@ -36,7 +37,7 @@ async function startServer() {
   const PORT = 3000;
   
   // Attach raw HTTP server to bind our Gateway WebSockets
-  const httpServer = require('http').createServer(app);
+  const httpServer = http.createServer(app);
 
   app.use(express.json());
 

@@ -1,6 +1,6 @@
-import { BaseIntegration } from './BaseIntegration';
-import { CircuitBreaker } from '../safeties/CircuitBreaker';
-import { RetryPolicy, DefaultIntegrationRetry } from '../safeties/RetryPolicy';
+import { BaseIntegration } from './BaseIntegration.ts';
+import { CircuitBreaker } from '../safeties/CircuitBreaker.ts';
+import { RetryPolicy, DefaultIntegrationRetry } from '../safeties/RetryPolicy.ts';
 
 /**
  * Enterprise Tool Registry

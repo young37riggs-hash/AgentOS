@@ -1,4 +1,4 @@
-import { GatewayControlPlane } from '../core/GatewayControlPlane';
+import { GatewayControlPlane } from '../core/GatewayControlPlane.ts';
 
 export interface IChannelConfig {
   channelId: string;
@@ -14,8 +14,11 @@ export interface IChannelConfig {
  */
 export class ChannelManager {
   private readonly activeChannels = new Map<string, IChannelConfig>();
+  private readonly gateway: GatewayControlPlane;
 
-  constructor(private readonly gateway: GatewayControlPlane) {}
+  constructor(gateway: GatewayControlPlane) {
+    this.gateway = gateway;
+  }
 
   public registerChannel(config: IChannelConfig) {
     if (this.activeChannels.has(config.channelId)) {

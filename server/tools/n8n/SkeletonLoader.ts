@@ -1,4 +1,4 @@
-import { BaseIntegration, IIntegrationSpec, IToolInvocation, IIntegrationResult } from '../BaseIntegration';
+import { BaseIntegration, IIntegrationSpec, IToolInvocation, IIntegrationResult } from '../BaseIntegration.ts';
 
 /**
  * Mock Skeleton Implementation to demonstrate scaling to 400+ tools (n8n style).

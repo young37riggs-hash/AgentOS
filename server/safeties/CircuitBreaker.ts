@@ -6,11 +6,13 @@ export interface CircuitBreakerOptions {
   requestTimeoutMs?: number;
 }
 
-export enum CircuitState {
-  CLOSED = 'CLOSED',
-  OPEN = 'OPEN',
-  HALF_OPEN = 'HALF_OPEN'
-}
+export const CircuitState = {
+  CLOSED: 'CLOSED',
+  OPEN: 'OPEN',
+  HALF_OPEN: 'HALF_OPEN'
+} as const;
+
+export type CircuitState = typeof CircuitState[keyof typeof CircuitState];
 
 /**
  * Enterprise Production Grade Circuit Breaker
@@ -22,8 +24,11 @@ export class CircuitBreaker extends EventEmitter2 {
   private nextAttemptTime: number = 0;
   private readonly options: CircuitBreakerOptions;
 
-  constructor(public readonly serviceName: string, options?: Partial<CircuitBreakerOptions>) {
+  public readonly serviceName: string;
+
+  constructor(serviceName: string, options?: Partial<CircuitBreakerOptions>) {
     super({ wildcard: true, maxListeners: 100 });
+    this.serviceName = serviceName;
     this.options = {
       failureThreshold: 5,
       resetTimeoutMs: 30000,

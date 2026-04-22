@@ -1,6 +1,6 @@
-import { GatewayControlPlane } from '../core/GatewayControlPlane';
-import { IntegrationRegistry } from '../tools/IntegrationRegistry';
-import { ChannelManager } from '../channels/ChannelManager';
+import { GatewayControlPlane } from '../core/GatewayControlPlane.ts';
+import { IntegrationRegistry } from '../tools/IntegrationRegistry.ts';
+import { ChannelManager } from '../channels/ChannelManager.ts';
 
 export interface IAgentRuntimeOpts {
   mode: 'rpc' | 'autonomous';
@@ -13,12 +13,21 @@ export interface IAgentRuntimeOpts {
  * Orchestrates cross-agent sessions and tool stream lifecycles.
  */
 export class AgentRuntime {
+  private readonly gateway: GatewayControlPlane;
+  private readonly registry: IntegrationRegistry;
+  private readonly channelRouter: ChannelManager;
+  private readonly options: IAgentRuntimeOpts;
+
   constructor(
-    private readonly gateway: GatewayControlPlane,
-    private readonly registry: IntegrationRegistry,
-    private readonly channelRouter: ChannelManager,
-    private readonly options: IAgentRuntimeOpts
+    gateway: GatewayControlPlane,
+    registry: IntegrationRegistry,
+    channelRouter: ChannelManager,
+    options: IAgentRuntimeOpts
   ) {
+    this.gateway = gateway;
+    this.registry = registry;
+    this.channelRouter = channelRouter;
+    this.options = options;
     this.bindToGateway();
   }
 
