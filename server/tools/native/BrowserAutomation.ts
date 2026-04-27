@@ -1,4 +1,4 @@
-import { BaseIntegration, IIntegrationSpec, IToolInvocation, IIntegrationResult } from '../BaseIntegration.ts';
+import { BaseIntegration, type IIntegrationSpec, type IToolInvocation, type IIntegrationResult } from '../BaseIntegration.ts';
 import { DockerSandboxManager } from '../../sandbox/DockerSandboxManager.ts';
 
 /**

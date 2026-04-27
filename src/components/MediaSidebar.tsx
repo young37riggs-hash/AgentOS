@@ -26,7 +26,7 @@ export const MediaSidebar = () => {
           </div>
         </div>
       </div>
-      <div className="mb-8">
+      <div className="mb-8 md:pb-0 pb-20">
         <h2 className="text-[10px] text-gray-500 uppercase tracking-[0.3em] font-bold mb-4 flex items-center gap-2 metallic-text">
           <ImageIcon className="w-4 h-4" /> Gallery
         </h2>

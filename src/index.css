@@ -50,4 +50,14 @@
   .markdown-inline p {
     display: inline;
   }
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+  .h-screen-safe {
+    height: 100vh;
+    height: 100dvh;
+  }
 }

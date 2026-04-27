@@ -106,7 +106,7 @@ export const AgentOSSidebar = ({
         </div>
       </div>
 
-      <div>
+      <div className="md:pb-0 pb-20">
         <h2 className="text-[10px] text-gray-500 uppercase tracking-[0.3em] font-bold mb-4 flex items-center gap-2 metallic-text">
           <Cpu className="w-4 h-4" /> System Status
         </h2>

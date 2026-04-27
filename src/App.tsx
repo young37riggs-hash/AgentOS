@@ -1117,7 +1117,35 @@ export default function App() {
   };
 
   return (
-    <div className="fixed inset-0 bg-[#050505] text-gray-200 font-sans overflow-hidden selection:bg-emerald-500/30 flex flex-col md:flex-row">
+    <div className="fixed inset-0 bg-[#050505] text-gray-200 font-sans overflow-hidden selection:bg-emerald-500/30 flex flex-col md:flex-row pb-safe pt-safe">
+      <div className="absolute inset-0 bg-gradient-to-br from-blue-900/10 via-black to-purple-900/10 pointer-events-none" />
+
+      {/* MOBILE NAVIGATION BAR (Bottom/Floating) */}
+      <div className="md:hidden fixed bottom-0 left-0 right-0 z-[110] glass-panel !bg-black/95 border-t border-white/10 pb-safe shadow-[0_-10px_40px_rgba(0,0,0,0.5)]">
+        <div className="flex justify-around p-2">
+          {[
+            { id: 'agentos', icon: Terminal, label: 'Console', color: 'text-emerald-400' },
+            { id: 'orchestrator', icon: Network, label: 'Tasks', color: 'text-purple-400' },
+            { id: 'live', icon: Video, label: 'Live', color: 'text-red-400' },
+            { id: 'chat', icon: MessageSquare, label: 'Chat', color: 'text-blue-400' },
+            { id: 'menu', icon: Menu, label: 'More', onClick: () => setIsMobileMenuOpen(true), color: 'text-gray-400' }
+          ].map((item) => (
+            <button
+              key={item.id}
+              onClick={item.onClick || (() => { setMode(item.id as AppMode); setIsMobileMenuOpen(false); })}
+              className={`flex flex-col items-center gap-1 p-2 rounded-xl transition-all w-16 ${
+                mode === item.id 
+                  ? `bg-white/10 ${item.color} shadow-inner` 
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              <item.icon className="w-5 h-5 mb-0.5" />
+              <span className="text-[9px] uppercase tracking-wider font-bold truncate w-full text-center">{item.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* MOBILE MENU OVERLAY */}
       <AnimatePresence>
         {isMobileMenuOpen && (
@@ -1370,7 +1398,7 @@ export default function App() {
                 </button>
               </div>
             </div>
-            <div className="mb-8">
+            <div className="mb-8 md:pb-0 pb-20">
               <h2 className="text-[10px] text-gray-500 uppercase tracking-[0.3em] font-bold mb-4 flex items-center gap-2 metallic-text">
                 <Layers className="w-4 h-4" /> Context Window
               </h2>
@@ -1414,7 +1442,7 @@ export default function App() {
 
         {/* GITHUB SIDEBAR */}
         {mode === 'github' && (
-          <div className="flex-1 flex flex-col min-w-0 p-6 relative">
+          <div className="flex-1 flex flex-col min-w-0 p-6 relative md:pb-6 pb-20">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xl font-bold text-indigo-400 flex items-center gap-2 metallic-text"><Box className="w-6 h-6" /> GitHub Repository</h2>
             </div>
@@ -1587,7 +1615,7 @@ export default function App() {
                 </div>
 
                 {/* STICKY INPUT AREA */}
-                <div className="p-4 md:p-6 bg-gradient-to-t from-[#050505] via-[#050505] to-transparent flex-shrink-0">
+                <div className="p-4 md:p-6 bg-gradient-to-t from-[#050505] via-[#050505] to-transparent flex-shrink-0 md:pb-6 pb-20">
                   <div className="relative group max-w-4xl mx-auto w-full">
                     <div className="absolute -inset-1 bg-gradient-to-r from-emerald-500/20 via-blue-500/20 to-purple-500/20 rounded-2xl blur opacity-25 group-focus-within:opacity-100 transition-opacity duration-500" />
                     <div className="relative flex items-center glass-panel !bg-black/80 border-white/10 rounded-2xl p-1.5 md:p-2 shadow-2xl">
@@ -1733,7 +1761,7 @@ export default function App() {
             )}
           </div>
           
-          <div className="relative group max-w-4xl mx-auto w-full">
+          <div className="relative group max-w-4xl mx-auto w-full md:pb-0 pb-20">
             <div className="absolute -inset-1 bg-gradient-to-r from-blue-500/20 to-cyan-500/20 rounded-2xl blur opacity-25 group-focus-within:opacity-100 transition-opacity duration-500" />
             <div className="relative flex items-center glass-panel !bg-black/60 border-white/10 rounded-2xl p-1.5 md:p-2 shadow-2xl">
               <input 
@@ -1805,7 +1833,7 @@ export default function App() {
               )}
             </motion.div>
 
-            <div className="w-full max-w-xl relative group">
+            <div className="w-full max-w-xl relative group md:pb-0 pb-20">
               <div className="absolute -inset-1 bg-gradient-to-r from-pink-500/20 to-purple-500/20 rounded-2xl blur opacity-25 group-focus-within:opacity-100 transition-opacity duration-500" />
               <div className="relative flex flex-col glass-panel !bg-black/60 border-white/10 rounded-2xl p-2 shadow-2xl">
                 <input 
@@ -2191,7 +2219,7 @@ export default function App() {
             </div>
 
             {/* Orchestrator AI Section */}
-            <div className="h-64 flex flex-col glass-panel !bg-black/40 border-white/5 rounded-3xl p-6 shadow-2xl">
+            <div className="h-64 flex flex-col glass-panel !bg-black/40 border-white/5 rounded-3xl p-6 shadow-2xl md:mb-0 mb-20">
               <h3 className="text-sm font-bold text-gray-300 mb-4 flex items-center gap-2 uppercase tracking-widest">
                 <Brain className="w-4 h-4 text-purple-400" /> AI Orchestration Logs
               </h3>
@@ -2274,7 +2302,7 @@ export default function App() {
             )}
           </div>
           
-          <div className="relative group max-w-4xl mx-auto w-full">
+          <div className="relative group max-w-4xl mx-auto w-full md:pb-0 pb-20">
             <div className="absolute -inset-1 bg-gradient-to-r from-orange-500/20 to-yellow-500/20 rounded-2xl blur opacity-25 group-focus-within:opacity-100 transition-opacity duration-500" />
             <div className="relative flex items-center glass-panel !bg-black/60 border-white/10 rounded-2xl p-2 shadow-2xl">
               <input 
@@ -2299,7 +2327,7 @@ export default function App() {
       )}
 
       {mode === 'live' && (
-        <div className="flex-1 flex flex-col min-w-0 p-6 items-center justify-center relative">
+        <div className="flex-1 flex flex-col min-w-0 p-6 items-center justify-center relative md:pb-6 pb-20 overflow-y-auto">
           <div className="w-full max-w-4xl grid grid-cols-1 md:grid-cols-3 gap-6 h-full max-h-[80vh] relative z-10">
             {/* Main Video Area */}
             <div className="md:col-span-2 flex flex-col gap-4">
@@ -2414,7 +2442,7 @@ export default function App() {
 
       {/* RIGHT SIDEBAR: Tripartite Minds */}
       {mode === 'agentos' && (
-        <div className="w-full md:w-80 glass-panel border-l border-white/10 flex flex-col flex-shrink-0 overflow-y-auto custom-scrollbar relative z-10">
+        <div className="w-full md:w-80 glass-panel border-l border-white/10 flex flex-col flex-shrink-0 overflow-y-auto custom-scrollbar relative z-10 md:pb-0 pb-20">
           <div className="p-6 border-b border-white/10 sticky top-0 bg-black/60 backdrop-blur-xl z-20">
             <h2 className="text-[10px] text-gray-500 uppercase tracking-[0.3em] font-bold flex items-center gap-2 metallic-text">
               <Brain className="w-4 h-4" /> Tripartite Minds
@@ -2617,7 +2645,7 @@ export default function App() {
             </button>
           </div>
           
-          <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar bg-black/40">
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar bg-black/40 md:pb-6 pb-20">
             {explorerLogs.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-gray-700 opacity-50 text-center p-4">
                 <motion.div
